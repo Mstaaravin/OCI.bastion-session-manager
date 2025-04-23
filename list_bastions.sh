@@ -3,7 +3,7 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: list_bastions.sh
-# Version: 1.0.1
+# Version: 1.0.2
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Lists and manages OCI Cloud bastion sessions
@@ -15,10 +15,14 @@
 # =================================================================
 #
 # DESCRIPTION:
-#   This script lists and provides details about bastion sessions in 
-#   Oracle Cloud Infrastructure (OCI). It allows viewing all active 
-#   sessions for a specific bastion, with options to show detailed 
+#   This script lists and provides details about bastion sessions in
+#   Oracle Cloud Infrastructure (OCI). It allows viewing all active
+#   sessions for a specific bastion, with options to show detailed
 #   information for individual sessions.
+#
+#   NOTE: This script uses the OCI CLI authentication configuration
+#   located at ~/.oci/config for authentication with OCI services.
+#   Make sure this file is properly configured before using the script.
 #
 # USAGE:
 #   ./list_bastions.sh [options]
@@ -52,6 +56,13 @@ BASTION_OCID="ocid1.bastion.oc1.sa-bogota-1.amaaaaaac5t2n5aacn4iortj4uytzn647eji
 OCI_REGION="sa-bogota-1"
 OCI_PROFILE="DEFAULT"
 SHOW_SESSION=""
+
+# Check if OCI config exists
+if [ ! -f ~/.oci/config ]; then
+    echo "Error: OCI configuration file not found at ~/.oci/config"
+    echo "Please make sure the OCI CLI is installed and configured properly."
+    exit 1
+fi
 
 # Function to show script usage
 show_usage() {
@@ -112,6 +123,12 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
+# Check if oci CLI is installed
+if ! command -v oci &> /dev/null; then
+    echo "Error: OCI CLI is required for this script. Please install it."
+    exit 1
+fi
+
 # List bastion sessions
 echo "Querying sessions for bastion: $BASTION_OCID"
 echo "Using OCI profile: $OCI_PROFILE"
@@ -133,12 +150,12 @@ fi
 if [ -n "$SHOW_SESSION" ]; then
     # Search for the session by name
     SESSION_DETAILS=$(echo "$SESSIONS" | jq -c --arg name "$SHOW_SESSION" '.data[] | select(."display-name" == $name)')
-    
+
     if [ -z "$SESSION_DETAILS" ]; then
         echo "No session found with name: $SHOW_SESSION"
         exit 1
     fi
-    
+
     # Show complete details
     echo "Complete details for session: $SHOW_SESSION"
     echo "$SESSION_DETAILS" | jq '.'
@@ -167,7 +184,7 @@ echo "$SESSIONS" | jq -c '.data[]' | while read -r session; do
     state=$(echo "$session" | jq -r '."lifecycle-state" // "Unknown"')
     ttl=$(echo "$session" | jq -r '."session-ttl-in-seconds" // "0"')
     id=$(echo "$session" | jq -r '.id')
-    
+
     # Convert TTL from seconds to hours - more reliable method
     if [ "$ttl" != "null" ] && [ "$ttl" != "0" ]; then
         # Use basic bash arithmetic instead of bc
@@ -175,10 +192,10 @@ echo "$SESSIONS" | jq -c '.data[]' | while read -r session; do
     else
         ttl_hours="N/A"
     fi
-    
+
     # Get the last 8 characters of the ID for display
     short_id="${id: -8}"
-    
+
     # Print the table row
     printf "%-25s %-30s %-10s %-15s %-15s %-25s\n" \
            "${name:0:25}" "${target:0:30}" "$port" "$state" "$ttl_hours" "$short_id"
