@@ -1,4 +1,51 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Copyright (c) 2025. All rights reserved.
+#
+# Name: list_bastions.sh
+# Version: 1.0.1
+# Author: Mstaaravin
+# Contributors: Developed with assistance from Claude AI
+# Description: Lists and manages OCI Cloud bastion sessions
+#              Provides detailed information about active sessions
+#              Compatible with OCI CLI
+#
+# =================================================================
+# OCI Bastion Sessions Manager
+# =================================================================
+#
+# DESCRIPTION:
+#   This script lists and provides details about bastion sessions in 
+#   Oracle Cloud Infrastructure (OCI). It allows viewing all active 
+#   sessions for a specific bastion, with options to show detailed 
+#   information for individual sessions.
+#
+# USAGE:
+#   ./list_bastions.sh [options]
+#
+# OPTIONS:
+#   -b, --bastion OCID    Bastion OCID (default: configured OCID)
+#   -r, --region REGION   OCI Region (default: configured region)
+#   -p, --profile PROFILE OCI Profile to use (default: DEFAULT)
+#   -s, --show NAME       Show detailed information for a specific session
+#   -h, --help            Show this help message
+#
+# EXAMPLES:
+#   # Interactive mode with default values:
+#   ./list_bastions.sh
+#
+#   # List sessions for a specific bastion:
+#   ./list_bastions.sh -b ocid1.bastion.oc1.region.xxxx
+#
+#   # List sessions for a specific region:
+#   ./list_bastions.sh -r us-ashburn-1
+#
+#   # Show detailed information for a specific session:
+#   ./list_bastions.sh -s "my-session-name"
+#
+#   # Use a specific OCI profile:
+#   ./list_bastions.sh -p PRODUCTION
+#
 
 # Global variables
 BASTION_OCID="ocid1.bastion.oc1.sa-bogota-1.amaaaaaac5t2n5aacn4iortj4uytzn647ejislwwhttvuc3lhnc3wwjq7zrq"
@@ -121,8 +168,13 @@ echo "$SESSIONS" | jq -c '.data[]' | while read -r session; do
     ttl=$(echo "$session" | jq -r '."session-ttl-in-seconds" // "0"')
     id=$(echo "$session" | jq -r '.id')
     
-    # Convert TTL from seconds to hours
-    ttl_hours=$(echo "scale=2; $ttl/3600" | bc 2>/dev/null || echo "N/A")
+    # Convert TTL from seconds to hours - more reliable method
+    if [ "$ttl" != "null" ] && [ "$ttl" != "0" ]; then
+        # Use basic bash arithmetic instead of bc
+        ttl_hours=$(printf "%.2f" $(echo "$ttl / 3600" | awk '{print $1}'))
+    else
+        ttl_hours="N/A"
+    fi
     
     # Get the last 8 characters of the ID for display
     short_id="${id: -8}"
