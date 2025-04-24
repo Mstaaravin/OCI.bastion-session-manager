@@ -3,7 +3,7 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: bastion_manage.sh
-# Version: 1.1.0
+# Version: 1.1.1
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Comprehensive OCI Cloud bastion management script
@@ -29,6 +29,11 @@
 #   NOTE: This script uses the OCI CLI authentication configuration
 #   located at ~/.oci/config for authentication with OCI services.
 #   Make sure this file is properly configured before using the script.
+#
+#   - For SSH sessions: The Bastion plugin must be enabled on the target compute instance.
+#     This is required by OCI and can be configured in the OCI Console or using the OCI CLI.
+#     Without this plugin enabled, SSH sessions will fail with an InvalidParameter error.
+#   - Port forwarding sessions do not require the Bastion plugin on the target instance.
 #
 # USAGE:
 #   ./bastion_manage.sh <verb> <object> [options]
@@ -81,13 +86,16 @@ SHOW_SESSION=""
 
 # Additional variables for session management
 SESSION_NAME="test01"
-TARGET_IP=""
+TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1.*****"
+TARGET_OS_USER="opc"
+TARGET_OS_USER="opc"
+PUBLIC_KEY_FILE="~/.ssh/carlmira.pub"
+TARGET_IP="10.0.1.224"
 TARGET_PORT=22
 SESSION_TYPE="SSH"
-SESSION_TTL=3600
+SESSION_TTL=1800
 SESSION_OCID=""
 KEY_TYPE="PUB"
-PUBLIC_KEY_FILE="~/.ssh/carlmira.pub"
 
 # Additional required variables
 DEBUG_MODE=false
@@ -452,17 +460,20 @@ show_create_session_usage() {
     echo "Options:"
     echo "  -b, --bastion-id OCID      Bastion OCID (required)"
     echo "  -n, --name NAME            Session display name (required)"
-    echo "  -t, --target-ip IP         Target private IP address (required)"
+    echo "  -t, --target-ip IP         Target private IP address (required for PORT_FORWARDING)"
     echo "  -p, --port PORT            Target port (default: $TARGET_PORT)"
     echo "  --type TYPE                Session type (SSH or PORT_FORWARDING, default: $SESSION_TYPE)"
-    echo "  --ttl SECONDS              Session time-to-live in seconds (default: $SESSION_TTL)"
+    echo "  --ttl SECONDS              Session time-to-live in seconds (minimum: 1800, default: $SESSION_TTL)"
     echo "  --key-type TYPE            Key type (PUB or PEM, default: $KEY_TYPE)"
     echo "  --key-file PATH            Public key file (default: $PUBLIC_KEY_FILE)"
+    echo "  --target-id OCID           Target compute instance OCID (required for SSH sessions)"
+    echo "  --target-user USER         Target OS username (default: $TARGET_OS_USER, required for SSH sessions)"
     echo "  -r, --region REGION        OCI Region (default: configured region)"
     echo "  --profile PROFILE          OCI Profile to use (default: $OCI_PROFILE)"
     echo "  --debug                    Enable debug mode to show detailed information"
     echo "  -h, --help                 Show this help message"
 }
+
 
 # Function to create a session
 create_session() {
@@ -502,6 +513,14 @@ create_session() {
                 PUBLIC_KEY_FILE="$2"
                 shift 2
                 ;;
+            --target-id)
+                TARGET_RESOURCE_OCID="$2"
+                shift 2
+                ;;
+            --target-user)
+                TARGET_OS_USER="$2"
+                shift 2
+                ;;
             -r|--region)
                 OCI_REGION="$2"
                 shift 2
@@ -539,20 +558,39 @@ create_session() {
         exit 1
     fi
     
-    if [ -z "$TARGET_IP" ]; then
-        echo "Error: Target IP (-t, --target-ip) is required."
-        show_create_session_usage
-        exit 1
-    fi
-    
-    # Validate bastion OCID
-    validate_ocid "$BASTION_OCID" "Bastion"
-    
     # Validate session type
     if [[ ! "$SESSION_TYPE" =~ ^(SSH|PORT_FORWARDING)$ ]]; then
         echo "Error: Invalid session type '$SESSION_TYPE'. Must be SSH or PORT_FORWARDING."
         show_create_session_usage
         exit 1
+    fi
+    
+    # Check SSH-specific parameters
+    if [ "$SESSION_TYPE" = "SSH" ]; then
+        if [ -z "$TARGET_RESOURCE_OCID" ]; then
+            echo "Error: Target resource OCID (--target-id) is required for SSH sessions."
+            show_create_session_usage
+            exit 1
+        fi
+        validate_ocid "$TARGET_RESOURCE_OCID" "Target Resource"
+    else
+        # PORT_FORWARDING requires target IP
+        if [ -z "$TARGET_IP" ]; then
+            echo "Error: Target IP (-t, --target-ip) is required for PORT_FORWARDING sessions."
+            show_create_session_usage
+            exit 1
+        fi
+        
+        # Validate target IP
+        if [[ ! "$TARGET_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Warning: Target IP '$TARGET_IP' might not be in the correct format."
+            echo "Expected format: x.x.x.x (e.g., 10.0.0.25)"
+            read -p "Continue anyway? (y/n): " confirm_ip
+            if [[ $confirm_ip != [yY] && $confirm_ip != [yY][eE][sS] ]]; then
+                echo "Session creation cancelled."
+                exit 0
+            fi
+        fi
     fi
     
     # Validate key type if provided
@@ -562,18 +600,14 @@ create_session() {
         exit 1
     fi
     
-    # Validate target IP
-    if [[ ! "$TARGET_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "Warning: Target IP '$TARGET_IP' might not be in the correct format."
-        echo "Expected format: x.x.x.x (e.g., 10.0.0.25)"
-        read -p "Continue anyway? (y/n): " confirm_ip
-        if [[ $confirm_ip != [yY] && $confirm_ip != [yY][eE][sS] ]]; then
-            echo "Session creation cancelled."
-            exit 0
-        fi
+    # Verify session TTL is at least 1800 seconds (30 minutes)
+    if [ "$SESSION_TTL" -lt 1800 ]; then
+        echo "Warning: Requested TTL ($SESSION_TTL seconds) is less than the minimum required (1800 seconds)."
+        echo "Setting TTL to the minimum allowed: 1800 seconds."
+        SESSION_TTL=1800
     fi
     
-    # Validate public key file exists
+    # Validate public key file exists for SSH sessions
     if [ "$SESSION_TYPE" = "SSH" ]; then
         # Expand the tilde in the path
         expanded_key_file="${PUBLIC_KEY_FILE/#\~/$HOME}"
@@ -597,6 +631,9 @@ create_session() {
             fi
         fi
     fi
+    
+    # Validate bastion OCID
+    validate_ocid "$BASTION_OCID" "Bastion"
     
     # Verify OCI CLI and authentication
     verify_oci_auth
@@ -638,18 +675,23 @@ create_session() {
         SESSION_TTL="$MAX_BASTION_TTL"
     fi
 
-# Show summary of session to be created
+    # Show summary of session to be created
     echo "Creating session with the following configuration:"
     echo "  Name: $SESSION_NAME"
     echo "  Bastion OCID: $BASTION_OCID"
-    echo "  Target IP: $TARGET_IP"
-    echo "  Target Port: $TARGET_PORT"
     echo "  Session Type: $SESSION_TYPE"
     echo "  Session TTL: $SESSION_TTL seconds"
+    
     if [ "$SESSION_TYPE" = "SSH" ]; then
+        echo "  Target Resource OCID: $TARGET_RESOURCE_OCID"
+        echo "  Target OS Username: $TARGET_OS_USER"
         echo "  Key Type: $KEY_TYPE"
         echo "  Public Key File: $PUBLIC_KEY_FILE"
+    else
+        echo "  Target IP: $TARGET_IP"
+        echo "  Target Port: $TARGET_PORT"
     fi
+    
     echo "  OCI Profile: $OCI_PROFILE"
     if [ -n "$OCI_REGION" ]; then
         echo "  Region: $OCI_REGION"
@@ -669,12 +711,13 @@ create_session() {
         # Create SSH session
         echo "Creating SSH session..."
         
-        # Build the command
+        # Build the command with corrected parameters
         create_cmd="oci bastion session create-managed-ssh \
             --bastion-id \"$BASTION_OCID\" \
             --display-name \"$SESSION_NAME\" \
-            --session-ttl-in-seconds $SESSION_TTL \
-            --target-resource-details '{\"targetResourcePrivateIpAddress\": \"$TARGET_IP\", \"targetResourcePort\": $TARGET_PORT}' \
+            --session-ttl $SESSION_TTL \
+            --target-resource-id \"$TARGET_RESOURCE_OCID\" \
+            --target-os-username \"$TARGET_OS_USER\" \
             --profile \"$OCI_PROFILE\" \
             $region_param"
         
@@ -698,8 +741,9 @@ create_session() {
         create_cmd="oci bastion session create-port-forwarding \
             --bastion-id \"$BASTION_OCID\" \
             --display-name \"$SESSION_NAME\" \
-            --session-ttl-in-seconds $SESSION_TTL \
-            --target-resource-details '{\"targetResourcePrivateIpAddress\": \"$TARGET_IP\", \"targetResourcePort\": $TARGET_PORT}' \
+            --session-ttl $SESSION_TTL \
+            --target-private-ip \"$TARGET_IP\" \
+            --target-port $TARGET_PORT \
             --profile \"$OCI_PROFILE\" \
             $region_param"
             
@@ -709,8 +753,6 @@ create_session() {
         # Create the session
         SESSION_OUTPUT=$(eval "$create_cmd" 2>&1)
     fi
-
-
     
     # Check for errors
     EXIT_CODE=$?
@@ -804,6 +846,7 @@ create_session() {
     
     echo "========================================"
 }
+
 
 #
 # LIST BASTION FUNCTIONS
