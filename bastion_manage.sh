@@ -3,7 +3,7 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: bastion_manage.sh
-# Version: 1.2.0
+# Version: 1.2.1
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Comprehensive OCI Cloud bastion management script
@@ -30,7 +30,7 @@
 #   located at ~/.oci/config for authentication with OCI services.
 #   Make sure this file is properly configured before using the script.
 #
-#   For a complete documentation of the OCI Bastion service, refer to: 
+#   For a complete documentation of the OCI Bastion service, refer to:
 #   https://docs.oracle.com/en-us/iaas/tools/oci-cli/3.54.4/oci_cli_docs/cmdref/bastion/bastion/create.html or
 #   https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/bastion/bastion/create.html
 #
@@ -76,11 +76,6 @@
 #   --key-type TYPE            Key type (PUB or PEM, default: PUB)
 #   --key-file PATH            Public key file (default: ~/.ssh/id_rsa.pub)
 #
-# LIST BASTION OPTIONS:
-#   -c, --compartment-id OCID  Compartment OCID to list bastions from (required)
-#   --all                      Include bastions in direct child compartments
-#   --include-children         Same as --all (only searches one level deep)
-#
 # EXAMPLES:
 #   # Create a new bastion: (requires compartment OCID, subnet OCID)
 #   ./bastion_manage.sh create bastion -c ocid1.compartment.oc1..example -n my-bastion -s ocid1.subnet.oc1.example
@@ -99,13 +94,13 @@
 #   # List all bastions in a compartment:
 #   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example
 #
-#   # List bastions in a compartment and its direct children:
-#   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example --all
+#   # List all bastions across all accessible compartments:
+#   ./bastion_manage.sh list bastion --all
 #
 #   # List all sessions for a bastion: (you need to know previously created bastion OCID)
 #   ./bastion_manage.sh list session -b ocid1.bastion.oc1.region.xxxx
 #
-#   # Show detailed information for a bastion: (you need to know previously created bastion OCID)
+#   # Show detailed information for a bastion:
 #   ./bastion_manage.sh show bastion -b ocid1.bastion.oc1.region.xxxx
 #
 #   # Show detailed information for a session by name:
@@ -122,18 +117,18 @@
 
 # Global variables as specified
 OCI_REGION="sa-santiago-1"
-COMPARTMENT_OCID="ocid1.compartment.oc1.."
-TARGET_SUBNET_OCID="ocid1.subnet.oc1.sa-santiago-1."
+COMPARTMENT_OCID="ocid1.compartment.oc1..aaaaaaaa"
+TARGET_SUBNET_OCID="ocid1.subnet.oc1.sa-santiago-1.aaaaaaaa"
 BASTION_NAME="bastion04"
 CLIENT_CIDR="0.0.0.0/0"
 MAX_SESSION_TTL=10800
 OCI_PROFILE="DEFAULT"
-BASTION_OCID="ocid1.bastion.oc1.sa-santiago-1."
+BASTION_OCID="ocid1.bastion.oc1.sa-santiago-1.amaaaaaa"
 SHOW_SESSION=""
 
 # Additional variables for session management
-SESSION_NAME="test01"
-TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1."
+SESSION_NAME="session04"
+TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1.anzwgljr"
 TARGET_OS_USER="opc"
 TARGET_OS_USER="opc"
 PUBLIC_KEY_FILE="~/.ssh/carlmira.pub"
@@ -824,9 +819,9 @@ create_session() {
     
     # Wait for the session to become active
     echo "Waiting for session to become active..."
-    MAX_WAIT_SECONDS=60
+    MAX_WAIT_SECONDS=180
     WAITED_SECONDS=0
-    INTERVAL=5
+    INTERVAL=10
     
     while [ $WAITED_SECONDS -lt $MAX_WAIT_SECONDS ]; do
         SESSION_INFO=$(oci bastion session get \
@@ -857,14 +852,29 @@ create_session() {
         WAITED_SECONDS=$((WAITED_SECONDS + INTERVAL))
     done
     
-    if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
+    SESSION_ACTIVATED=false
+      if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
         echo "Warning: Timed out waiting for session to become active."
-        echo "Please check the session status manually:"
-        echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
-        exit 0
+        echo "The session was created but has not reached ACTIVE state yet."
+        echo ""
+        # Intentar obtener el estado actual
+        SESSION_INFO=$(oci bastion session get \
+            --session-id "$SESSION_OCID" \
+            --profile "$OCI_PROFILE" \
+            $region_param 2>/dev/null)
+            
+        if [ $? -eq 0 ]; then
+            SESSION_STATE=$(echo "$SESSION_INFO" | jq -r '.data."lifecycle-state"' 2>/dev/null)
+            echo "Current state: $SESSION_STATE"
+        else
+            echo "Could not retrieve current session state."
+        fi
+    else
+        SESSION_ACTIVATED=true
     fi
-    
+
     # Display session information and connection details
+    echo ""
     echo "========================================"
     echo "Session created successfully!"
     echo "========================================"
@@ -873,6 +883,15 @@ create_session() {
     echo "State: $SESSION_STATE"
     echo "TTL: $SESSION_TTL seconds (expires in ~$(($SESSION_TTL / 60)) minutes)"
     echo "========================================"
+
+    if [ "$SESSION_ACTIVATED" = false ]; then
+        echo "To check session status later, use:"
+        echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
+        echo ""
+    fi
+
+
+
     
     # Show connection information based on session type
     if [ "$SESSION_TYPE" = "SSH" ]; then
