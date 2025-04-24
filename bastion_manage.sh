@@ -3,7 +3,7 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: bastion_manage.sh
-# Version: 1.1.1
+# Version: 1.2.0
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Comprehensive OCI Cloud bastion management script
@@ -11,7 +11,7 @@
 #              Compatible with OCI CLI
 #
 # =================================================================
-# OCI Bastion Management Tool
+# OCI Bastion Script Management Tool
 # =================================================================
 #
 # DESCRIPTION:
@@ -30,10 +30,9 @@
 #   located at ~/.oci/config for authentication with OCI services.
 #   Make sure this file is properly configured before using the script.
 #
-#   - For SSH sessions: The Bastion plugin must be enabled on the target compute instance.
-#     This is required by OCI and can be configured in the OCI Console or using the OCI CLI.
-#     Without this plugin enabled, SSH sessions will fail with an InvalidParameter error.
-#   - Port forwarding sessions do not require the Bastion plugin on the target instance.
+#   For a complete documentation of the OCI Bastion service, refer to: 
+#   https://docs.oracle.com/en-us/iaas/tools/oci-cli/3.54.4/oci_cli_docs/cmdref/bastion/bastion/create.html or
+#   https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/bastion/bastion/create.html
 #
 # USAGE:
 #   ./bastion_manage.sh <verb> <object> [options]
@@ -53,40 +52,88 @@
 #   ./bastion_manage.sh help <verb> <object>
 #   Example: ./bastion_manage.sh help create bastion
 #
+# COMMON PARAMETERS:
+#   -r, --region REGION        Specify OCI Region (default: configured region)
+#   -p, --profile PROFILE      Specify OCI Profile to use (default: DEFAULT)
+#   --debug                    Enable debug mode for detailed information
+#   -h, --help                 Show help for the specific command
+#
+# CREATE BASTION OPTIONS:
+#   -c, --compartment-id OCID  Compartment OCID (required)
+#   -n, --name NAME            Bastion name (required)
+#   -s, --target-subnet-id OCID Target subnet OCID (required)
+#   -v, --vcn-id OCID          VCN OCID (recommended for validation)
+#   --client-cidr CIDR         Client CIDR blocks allowed (default: 0.0.0.0/0)
+#   --max-session-ttl SECONDS  Maximum session TTL in seconds (default: 10800)
+#
+# CREATE SESSION OPTIONS:
+#   -b, --bastion-id OCID      Bastion OCID (required)
+#   -n, --name NAME            Session name (required)
+#   -t, --target-ip IP         Target private IP address (required)
+#   -p, --port PORT            Target port (default: 22)
+#   --type TYPE                Session type (SSH or PORT_FORWARDING, default: SSH)
+#   --ttl SECONDS              Session TTL in seconds (default: 3600)
+#   --key-type TYPE            Key type (PUB or PEM, default: PUB)
+#   --key-file PATH            Public key file (default: ~/.ssh/id_rsa.pub)
+#
+# LIST BASTION OPTIONS:
+#   -c, --compartment-id OCID  Compartment OCID to list bastions from (required)
+#   --all                      Include bastions in direct child compartments
+#   --include-children         Same as --all (only searches one level deep)
+#
 # EXAMPLES:
-#   # Create a new bastion:
+#   # Create a new bastion: (requires compartment OCID, subnet OCID)
 #   ./bastion_manage.sh create bastion -c ocid1.compartment.oc1..example -n my-bastion -s ocid1.subnet.oc1.example
 #
-#   # Create a new SSH session:
+#   # Create a new SSH session: (requires VM OCID, target IP and OS user)
 #   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n my-session -t 10.0.0.25
+#
+#   # Create a port forwarding session: (requires target IP and port)
+#   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n db-session -t 10.0.0.30 \
+#     -p 1521 --type PORT_FORWARDING --ttl 7200
+#
+#   # Create an SSH session with custom key file: (requires bastion OCID, target IP, OS user, key file and name session)
+#   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n secure-session \
+#     -t 10.0.0.25 --key-file ~/.ssh/custom_key.pub
 #
 #   # List all bastions in a compartment:
 #   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example
 #
-#   # List all sessions for a bastion:
+#   # List bastions in a compartment and its direct children:
+#   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example --all
+#
+#   # List all sessions for a bastion: (you need to know previously created bastion OCID)
 #   ./bastion_manage.sh list session -b ocid1.bastion.oc1.region.xxxx
 #
-#   # Show detailed information for a bastion:
+#   # Show detailed information for a bastion: (you need to know previously created bastion OCID)
 #   ./bastion_manage.sh show bastion -b ocid1.bastion.oc1.region.xxxx
 #
-#   # Show detailed information for a session:
+#   # Show detailed information for a session by name:
 #   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -s "my-session-name"
 #
+#   # Show detailed information for a session by ID:
+#   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -i ocid1.bastionsession.oc1.region.xxxx
+#
+#   # Get help for a specific command:
+#   ./bastion_manage.sh help create bastion
+#   ./bastion_manage.sh help list session
+#
+
 
 # Global variables as specified
 OCI_REGION="sa-santiago-1"
-COMPARTMENT_OCID="ocid1.compartment.oc1..*****"
-TARGET_SUBNET_OCID="ocid1.subnet.oc1.sa-santiago-1.*****"
+COMPARTMENT_OCID="ocid1.compartment.oc1.."
+TARGET_SUBNET_OCID="ocid1.subnet.oc1.sa-santiago-1."
 BASTION_NAME="bastion04"
 CLIENT_CIDR="0.0.0.0/0"
 MAX_SESSION_TTL=10800
 OCI_PROFILE="DEFAULT"
-BASTION_OCID="ocid1.bastion.oc1.sa-santiago-1.*****"
+BASTION_OCID="ocid1.bastion.oc1.sa-santiago-1."
 SHOW_SESSION=""
 
 # Additional variables for session management
 SESSION_NAME="test01"
-TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1.*****"
+TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1."
 TARGET_OS_USER="opc"
 TARGET_OS_USER="opc"
 PUBLIC_KEY_FILE="~/.ssh/carlmira.pub"
@@ -848,24 +895,16 @@ create_session() {
 }
 
 
-#
+################################################################################
 # LIST BASTION FUNCTIONS
-#
+################################################################################
 
-# Function to show list bastion usage
-show_list_bastion_usage() {
-    echo "Usage: $0 list bastion [options]"
-    echo "Options:"
-    echo "  -c, --compartment-id OCID  Compartment OCID to list bastions from (required)"
-    echo "  -r, --region REGION        OCI Region (default: configured region)"
-    echo "  -p, --profile PROFILE      OCI Profile to use (default: $OCI_PROFILE)"
-    echo "  --all                      List all bastions in the tenancy (requires proper permissions)"
-    echo "  -h, --help                 Show this help message"
-}
 
 # Function to list bastions
 list_bastion() {
     local all_compartments=false
+    local include_children=false
+    local child_compartments=()
     
     # Process arguments for list bastion command
     while [[ $# -gt 0 ]]; do
@@ -884,7 +923,11 @@ list_bastion() {
                 shift 2
                 ;;
             --all)
-                all_compartments=true
+                include_children=true
+                shift
+                ;;
+            --include-children)
+                include_children=true
                 shift
                 ;;
             -h|--help)
@@ -900,15 +943,10 @@ list_bastion() {
     done
     
     # Check required parameters
-    if [ -z "$COMPARTMENT_OCID" ] && [ "$all_compartments" = false ]; then
-        echo "Error: Compartment ID (-c, --compartment-id) is required unless --all is specified."
+    if [ -z "$COMPARTMENT_OCID" ]; then
+        echo "Error: Compartment ID (-c, --compartment-id) is required."
         show_list_bastion_usage
         exit 1
-    fi
-    
-    # Validate OCID if provided
-    if [ -n "$COMPARTMENT_OCID" ]; then
-        validate_ocid "$COMPARTMENT_OCID" "Compartment"
     fi
     
     # Prepare region parameter
@@ -916,32 +954,100 @@ list_bastion() {
     if [ -n "$OCI_REGION" ]; then
         region_param="--region $OCI_REGION"
     fi
-
-# List bastions
-    echo "Listing bastions..."
-    if [ "$all_compartments" = true ]; then
-        echo "Querying all bastions across all accessible compartments"
-        BASTIONS=$(oci bastion bastion list \
-            --all \
-            --profile "$OCI_PROFILE" \
-            $region_param)
-    else
-        echo "Querying bastions in compartment: $COMPARTMENT_OCID"
-        BASTIONS=$(oci bastion bastion list \
-            --compartment-id "$COMPARTMENT_OCID" \
-            --all \
-            --profile "$OCI_PROFILE" \
-            $region_param)
-    fi
     
+    # Validate OCID
+    validate_ocid "$COMPARTMENT_OCID" "Compartment"
+    
+    # Initialize results object
+    local all_bastions=$(echo '{"data": []}')
+    
+    # First, get bastions in the specified compartment
+    echo "Listing bastions..."
+    echo "Querying bastions in compartment: $COMPARTMENT_OCID"
+    
+    BASTIONS=$(oci bastion bastion list \
+        --compartment-id "$COMPARTMENT_OCID" \
+        --all \
+        --profile "$OCI_PROFILE" \
+        $region_param)
+        
     # Check for errors
     if [ $? -ne 0 ]; then
-        echo "Error listing bastions."
+        echo "Error listing bastions in compartment $COMPARTMENT_OCID."
         exit 1
     fi
     
-    # Count the number of bastions
-    BASTION_COUNT=$(echo "$BASTIONS" | jq '.data | length')
+    # Add these bastions to our results
+    all_bastions=$(echo "$BASTIONS")
+    
+    # If --all or --include-children is specified, get direct child compartments
+    if [ "$include_children" = true ]; then
+        echo "Retrieving direct child compartments for: $COMPARTMENT_OCID"
+        
+        CHILD_COMPARTMENTS=$(oci iam compartment list \
+            --compartment-id "$COMPARTMENT_OCID" \
+            --lifecycle-state ACTIVE \
+            --all \
+            --profile "$OCI_PROFILE" \
+            $region_param 2>/dev/null)
+            
+        if [ $? -ne 0 ]; then
+            echo "Warning: Failed to retrieve child compartments. Showing bastions from specified compartment only."
+        else
+            # Get the number of child compartments
+            local child_count=$(echo "$CHILD_COMPARTMENTS" | jq '.data | length')
+            
+            if [ -n "$child_count" ] && [ "$child_count" -gt 0 ]; then
+                echo "Found $child_count direct child compartments"
+                
+                # Initialize combined results with parent compartment bastions
+                local combined_results=$(echo "$BASTIONS")
+                
+                # For each child compartment, get bastions
+                echo "$CHILD_COMPARTMENTS" | jq -c '.data[]' | while read -r compartment; do
+                    local child_id=$(echo "$compartment" | jq -r '.id')
+                    local child_name=$(echo "$compartment" | jq -r '.name')
+                    
+                    echo "Querying bastions in child compartment: $child_name ($child_id)"
+                    
+                    CHILD_BASTIONS=$(oci bastion bastion list \
+                        --compartment-id "$child_id" \
+                        --all \
+                        --profile "$OCI_PROFILE" \
+                        $region_param 2>/dev/null)
+                        
+                    if [ $? -ne 0 ]; then
+                        echo "Warning: Error querying bastions in child compartment $child_name. Skipping."
+                        continue
+                    fi
+                    
+                    # Add compartment info to bastions and combine results
+                    local child_bastion_count=$(echo "$CHILD_BASTIONS" | jq '.data | length')
+                    if [ -n "$child_bastion_count" ] && [ "$child_bastion_count" -gt 0 ]; then
+                        echo "Found $child_bastion_count bastions in child compartment $child_name"
+                        
+                        # Add compartment ID and name to each bastion for better tracking
+                        CHILD_BASTIONS=$(echo "$CHILD_BASTIONS" | jq --arg comp_id "$child_id" --arg comp_name "$child_name" \
+                            '.data = [.data[] | . + {"compartment-id": $comp_id, "compartment-name": $comp_name}]')
+                        
+                        # Combine with existing results
+                        combined_results=$(echo "$combined_results" | jq --argjson new_data "$(echo "$CHILD_BASTIONS" | jq '.data')" \
+                            '.data += $new_data')
+                    else
+                        echo "No bastions found in child compartment $child_name"
+                    fi
+                done
+                
+                # Use the combined results
+                all_bastions=$combined_results
+            else
+                echo "No child compartments found for $COMPARTMENT_OCID"
+            fi
+        fi
+    fi
+    
+    # Count the number of bastions in the final result
+    BASTION_COUNT=$(echo "$all_bastions" | jq '.data | length')
     
     if [ "$BASTION_COUNT" -eq 0 ]; then
         echo "No bastions found."
@@ -950,20 +1056,29 @@ list_bastion() {
     
     # Print table header
     echo "=== Bastions ==="
-    printf "%-30s %-15s %-50s %-15s\n" \
-           "Name" "State" "OCID" "Region"
-    echo "-----------------------------------------------------------------------------------------------------"
+    printf "%-30s %-15s %-50s %-15s %-30s\n" \
+           "Name" "State" "OCID" "Region" "Compartment"
+    echo "---------------------------------------------------------------------------------------------------------------"
     
     # Extract and display information for each bastion
-    echo "$BASTIONS" | jq -c '.data[]' | while read -r bastion; do
+    echo "$all_bastions" | jq -c '.data[]' | while read -r bastion; do
         name=$(echo "$bastion" | jq -r '.name // "Unnamed"')
         state=$(echo "$bastion" | jq -r '."lifecycle-state" // "Unknown"')
         ocid=$(echo "$bastion" | jq -r '.id')
         region=$(echo "$bastion" | jq -r '."region" // "Unknown"')
         
+        # Try to get compartment name first, fall back to compartment ID
+        comp_name=$(echo "$bastion" | jq -r '."compartment-name" // "N/A"')
+        if [ "$comp_name" = "N/A" ]; then
+            comp_id=$(echo "$bastion" | jq -r '."compartment-id" // "Unknown"')
+            compartment=$(echo "$comp_id" | awk -F. '{print $2"."$3}')
+        else
+            compartment="$comp_name"
+        fi
+        
         # Print the table row
-        printf "%-30s %-15s %-50s %-15s\n" \
-               "${name:0:30}" "$state" "$ocid" "$region"
+        printf "%-30s %-15s %-50s %-15s %-30s\n" \
+               "${name:0:30}" "$state" "$ocid" "$region" "${compartment:0:30}"
     done
     
     echo ""
@@ -976,9 +1091,24 @@ list_bastion() {
     echo "$0 list session -b BASTION_OCID"
 }
 
-#
+# Function to show list bastion usage
+show_list_bastion_usage() {
+    echo "Usage: $0 list bastion [options]"
+    echo "Options:"
+    echo "  -c, --compartment-id OCID  Compartment OCID to list bastions from (required)"
+    echo "  -r, --region REGION        OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE      OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  --all                      Include bastions in direct child compartments"
+    echo "  --include-children         Same as --all"
+    echo "  -h, --help                 Show this help message"
+}
+
+
+
+
+################################################################################
 # LIST SESSION FUNCTIONS
-#
+################################################################################
 
 # Function to show list session usage
 show_list_session_usage() {
