@@ -1,0 +1,1297 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2025. All rights reserved.
+#
+# Name: bastion_manage.sh
+# Version: 1.0.0
+# Author: Mstaaravin
+# Contributors: Developed with assistance from Claude AI
+# Description: Comprehensive OCI Cloud bastion management script
+#              Creates, lists and manages OCI bastions and sessions
+#              Compatible with OCI CLI
+#
+# =================================================================
+# OCI Bastion Management Tool
+# =================================================================
+#
+# DESCRIPTION:
+#   This script provides a unified interface to manage Oracle Cloud Infrastructure (OCI)
+#   bastion services. It combines creation, listing, and management of bastions
+#   and sessions in a single tool with hierarchical commands.
+#
+#   Features include:
+#   - Creating new bastion services with customizable parameters
+#   - Creating new bastion sessions
+#   - Listing bastions in a compartment
+#   - Listing active sessions for a bastion
+#   - Showing detailed information about bastions and sessions
+#
+#   NOTE: This script uses the OCI CLI authentication configuration
+#   located at ~/.oci/config for authentication with OCI services.
+#   Make sure this file is properly configured before using the script.
+#
+# USAGE:
+#   ./bastion_manage.sh <verb> <object> [options]
+#
+# VERBS:
+#   create    Create a new resource (bastion or session)
+#   list      List resources (bastions or sessions)
+#   show      Show detailed information about a resource
+#   help      Show help information
+#
+# OBJECTS:
+#   bastion   OCI bastion service
+#   session   OCI bastion session
+#
+# OPTIONS:
+#   For detailed options for each command, run:
+#   ./bastion_manage.sh help <verb> <object>
+#   Example: ./bastion_manage.sh help create bastion
+#
+# EXAMPLES:
+#   # Create a new bastion:
+#   ./bastion_manage.sh create bastion -c ocid1.compartment.oc1..example -n my-bastion -s ocid1.subnet.oc1.example
+#
+#   # List all bastions in a compartment:
+#   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example
+#
+#   # List all sessions for a bastion:
+#   ./bastion_manage.sh list session -b ocid1.bastion.oc1.region.xxxx
+#
+#   # Show detailed information for a bastion:
+#   ./bastion_manage.sh show bastion -b ocid1.bastion.oc1.region.xxxx
+#
+#   # Show detailed information for a session:
+#   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -s "my-session-name"
+#
+
+# Global variables as specified
+OCI_REGION=""
+COMPARTMENT_OCID=""
+TARGET_SUBNET_OCID=""
+BASTION_NAME=""
+CLIENT_CIDR="0.0.0.0/0"
+MAX_SESSION_TTL=10800
+OCI_PROFILE="DEFAULT"
+BASTION_OCID=""
+SHOW_SESSION=""
+
+# Additional variables for session management
+SESSION_NAME=""
+TARGET_IP=""
+TARGET_PORT=22
+SESSION_TYPE="SSH"
+SESSION_TTL=3600
+SESSION_OCID=""
+
+# Additional required variables
+DEBUG_MODE=false
+VERB=""
+OBJECT=""
+
+# Check if OCI config exists
+if [ ! -f ~/.oci/config ]; then
+    echo "Error: OCI configuration file not found at ~/.oci/config"
+    echo "Please make sure the OCI CLI is installed and configured properly."
+    exit 1
+fi
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is required for this script. Please install it."
+    exit 1
+fi
+
+# Check if oci CLI is installed
+if ! command -v oci &> /dev/null; then
+    echo "Error: OCI CLI is required for this script. Please install it."
+    exit 1
+fi
+
+# Function to show main script usage
+show_main_usage() {
+    echo "Usage: $0 <verb> <object> [options]"
+    echo ""
+    echo "Verbs:"
+    echo "  create    Create a new resource (bastion or session)"
+    echo "  list      List resources (bastions or sessions)"
+    echo "  show      Show detailed information about a resource"
+    echo "  help      Show help information"
+    echo ""
+    echo "Objects:"
+    echo "  bastion   OCI bastion service"
+    echo "  session   OCI bastion session"
+    echo ""
+    echo "For detailed help on a specific command:"
+    echo "  $0 help <verb> <object>"
+    echo "  Example: $0 help create bastion"
+}
+
+# Debug function
+debug() {
+    if [ "$DEBUG_MODE" = true ]; then
+        echo "[DEBUG] $1"
+    fi
+}
+
+# Debug the exact command that will be executed
+debug_command() {
+    if [ "$DEBUG_MODE" = true ]; then
+        echo "[DEBUG] Executing command: $1"
+    fi
+}
+
+# Validate OCIDs (basic format checking)
+validate_ocid() {
+    local ocid="$1"
+    local name="$2"
+    
+    if [[ ! "$ocid" =~ ^ocid1\.[a-z-]+\.[a-z0-9-]+\.[a-z0-9-]+\..+ ]]; then
+        echo "Warning: $name OCID format may be incorrect."
+        echo "Expected format: ocid1.resource-type.region.id"
+        echo "Provided: $ocid"
+        read -p "Continue anyway? (y/n): " confirm_ocid
+        if [[ $confirm_ocid != [yY] && $confirm_ocid != [yY][eE][sS] ]]; then
+            echo "Operation cancelled."
+            exit 0
+        fi
+    fi
+}
+
+# Function to verify OCI CLI authentication
+verify_oci_auth() {
+    echo "Verifying OCI CLI authentication..."
+    OCI_TEST=$(oci iam region list --profile "$OCI_PROFILE" --all 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error: OCI CLI authentication failed:"
+        echo "$OCI_TEST"
+        echo "Please check your OCI configuration and credentials."
+        exit 1
+    fi
+}
+
+#
+# CREATE BASTION FUNCTIONS
+#
+
+# Function to show create bastion usage
+show_create_bastion_usage() {
+    echo "Usage: $0 create bastion [options]"
+    echo "Options:"
+    echo "  -c, --compartment-id OCID  Compartment OCID where bastion will be created (required)"
+    echo "  -n, --name NAME            Name for the bastion (required)"
+    echo "  -v, --vcn-id OCID          VCN OCID for validation and information (optional, but recommended)"
+    echo "  -s, --target-subnet-id OCID Subnet OCID where bastion will be created (required)"
+    echo "  --client-cidr CIDR         Client CIDR blocks allowed (default: $CLIENT_CIDR)"
+    echo "  --max-session-ttl SECONDS  Maximum session TTL in seconds (default: $MAX_SESSION_TTL)"
+    echo "  -r, --region REGION        OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE      OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  --debug                    Enable debug mode to show detailed information"
+    echo "  -h, --help                 Show this help message"
+}
+
+# Function to create a bastion
+create_bastion() {
+    # Process arguments for create bastion command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -c|--compartment-id)
+                COMPARTMENT_OCID="$2"
+                shift 2
+                ;;
+            -n|--name)
+                BASTION_NAME="$2"
+                shift 2
+                ;;
+            -v|--vcn-id)
+                VCN_ID="$2"
+                shift 2
+                ;;
+            -s|--target-subnet-id)
+                TARGET_SUBNET_OCID="$2"
+                shift 2
+                ;;
+            --client-cidr)
+                CLIENT_CIDR="$2"
+                shift 2
+                ;;
+            --max-session-ttl)
+                MAX_SESSION_TTL="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            -p|--profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            --debug)
+                DEBUG_MODE=true
+                shift
+                ;;
+            -h|--help)
+                show_create_bastion_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for create bastion command: $1"
+                show_create_bastion_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$COMPARTMENT_OCID" ]; then
+        echo "Error: Compartment ID (-c, --compartment-id) is required."
+        show_create_bastion_usage
+        exit 1
+    fi
+
+    if [ -z "$BASTION_NAME" ]; then
+        echo "Error: Bastion name (-n, --name) is required."
+        show_create_bastion_usage
+        exit 1
+    fi
+
+    if [ -z "$VCN_ID" ]; then
+        echo "Warning: VCN ID (-v, --vcn-id) is not provided."
+        echo "While not required by the OCI CLI, it is recommended for validation."
+        echo "The VCN will be inferred from the subnet."
+        read -p "Continue without VCN validation? (y/n): " confirm_vcn
+        if [[ $confirm_vcn != [yY] && $confirm_vcn != [yY][eE][sS] ]]; then
+            echo "Bastion creation cancelled."
+            exit 0
+        fi
+    fi
+
+    if [ -z "$TARGET_SUBNET_OCID" ]; then
+        echo "Error: Target subnet ID (-s, --target-subnet-id) is required."
+        show_create_bastion_usage
+        exit 1
+    fi
+    
+    # Verify OCI CLI and authentication
+    verify_oci_auth
+    
+    # Check if client CIDR format is correct
+    if [[ ! "$CLIENT_CIDR" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+        echo "Warning: Client CIDR '$CLIENT_CIDR' might not be in the correct format."
+        echo "Expected format: x.x.x.x/x (e.g., 0.0.0.0/0 or 10.0.0.0/16)"
+        read -p "Continue anyway? (y/n): " confirm_cidr
+        if [[ $confirm_cidr != [yY] && $confirm_cidr != [yY][eE][sS] ]]; then
+            echo "Bastion creation cancelled."
+            exit 0
+        fi
+    fi
+
+    # If multiple CIDR blocks are provided, format them properly for the API
+    if [[ "$CLIENT_CIDR" == *","* ]]; then
+        # Create a proper JSON array with quoted elements
+        IFS=',' read -ra CIDR_BLOCKS <<< "$CLIENT_CIDR"
+        client_cidr_json='['
+        for i in "${!CIDR_BLOCKS[@]}"; do
+            # Add comma if not the first element
+            if [ "$i" -gt 0 ]; then
+                client_cidr_json+=','
+            fi
+            # Trim whitespace and add quotes
+            client_cidr_json+='"'$(echo "${CIDR_BLOCKS[$i]}" | xargs)'"'
+        done
+        client_cidr_json+=']'
+    else
+        # Single CIDR block
+        client_cidr_json='["'"$CLIENT_CIDR"'"]'
+    fi
+    
+    # Validate OCIDs
+    validate_ocid "$COMPARTMENT_OCID" "Compartment"
+    if [ -n "$VCN_ID" ]; then
+        validate_ocid "$VCN_ID" "VCN"
+    fi
+    validate_ocid "$TARGET_SUBNET_OCID" "Target Subnet"
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # Show summary of bastion to be created
+    echo "Creating bastion with the following configuration:"
+    echo "  Name: $BASTION_NAME"
+    echo "  Compartment ID: $COMPARTMENT_OCID"
+    if [ -n "$VCN_ID" ]; then
+        echo "  VCN ID: $VCN_ID (for information only, not used by CLI)"
+    fi
+    echo "  Target Subnet: $TARGET_SUBNET_OCID"
+    echo "  Client CIDR: $(echo "$client_cidr_json" | sed 's/^\[//' | sed 's/\]$//' | sed 's/"//g')"
+    echo "  Max Session TTL: $MAX_SESSION_TTL seconds"
+    echo "  OCI Profile: $OCI_PROFILE"
+    if [ -n "$OCI_REGION" ]; then
+        echo "  Region: $OCI_REGION"
+    else
+        echo "  Region: [default from profile]"
+    fi
+    
+    # Confirm creation
+    read -p "Continue with bastion creation? (y/n): " confirm
+    if [[ $confirm != [yY] && $confirm != [yY][eE][sS] ]]; then
+        echo "Bastion creation cancelled."
+        exit 0
+    fi
+
+# Debug command
+    debug "Formatted CIDR JSON: $client_cidr_json"
+    debug_command "oci bastion bastion create --compartment-id \"$COMPARTMENT_OCID\" --bastion-type \"STANDARD\" --target-subnet-id \"$TARGET_SUBNET_OCID\" --client-cidr-list '$client_cidr_json' --max-session-ttl \"$MAX_SESSION_TTL\" --name \"$BASTION_NAME\" --profile \"$OCI_PROFILE\" $region_param"
+    
+    # Create the bastion with parameters
+    echo "Creating bastion..."
+    BASTION_OUTPUT=$(oci bastion bastion create \
+        --compartment-id "$COMPARTMENT_OCID" \
+        --bastion-type "STANDARD" \
+        --target-subnet-id "$TARGET_SUBNET_OCID" \
+        --client-cidr-list "$client_cidr_json" \
+        --max-session-ttl "$MAX_SESSION_TTL" \
+        --name "$BASTION_NAME" \
+        --profile "$OCI_PROFILE" \
+        $region_param 2>&1)
+    
+    # Check for errors
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo "Error creating bastion."
+        echo "Error details:"
+        echo "$BASTION_OUTPUT"
+        exit 1
+    fi
+    
+    # Extract and print the bastion OCID
+    BASTION_OCID=$(echo "$BASTION_OUTPUT" | jq -r '.data.id' 2>/dev/null)
+    if [ -z "$BASTION_OCID" ] || [ "$BASTION_OCID" == "null" ]; then
+        echo "Warning: Could not extract bastion OCID from the response."
+        echo "Full response:"
+        echo "$BASTION_OUTPUT"
+        exit 1
+    fi
+    
+    echo "Bastion creation initiated."
+    echo "Bastion OCID: $BASTION_OCID"
+    
+    # Wait for the bastion to become active (optional)
+    echo "Waiting for bastion to become active..."
+    MAX_WAIT_SECONDS=300
+    WAITED_SECONDS=0
+    INTERVAL=10
+    
+    while [ $WAITED_SECONDS -lt $MAX_WAIT_SECONDS ]; do
+        BASTION_INFO=$(oci bastion bastion get \
+            --bastion-id "$BASTION_OCID" \
+            --profile "$OCI_PROFILE" \
+            $region_param 2>&1)
+            
+        if [ $? -ne 0 ]; then
+            echo "Error getting bastion status:"
+            echo "$BASTION_INFO"
+            exit 1
+        fi
+        
+        BASTION_STATE=$(echo "$BASTION_INFO" | jq -r '.data."lifecycle-state"' 2>/dev/null)
+        
+        if [ "$BASTION_STATE" == "ACTIVE" ]; then
+            echo "Bastion is now ACTIVE."
+            break
+        elif [ "$BASTION_STATE" == "FAILED" ]; then
+            echo "Bastion creation failed."
+            echo "Full status:"
+            echo "$BASTION_INFO" | jq '.data'
+            exit 1
+        fi
+        
+        echo "Current state: $BASTION_STATE. Waiting $INTERVAL more seconds..."
+        sleep $INTERVAL
+        WAITED_SECONDS=$((WAITED_SECONDS + INTERVAL))
+    done
+    
+    if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
+        echo "Warning: Timed out waiting for bastion to become active."
+        echo "Please check the bastion status manually."
+    fi
+    
+    # Display final bastion information
+    echo "========================================"
+    echo "Bastion created successfully!"
+    echo "========================================"
+    echo "Name: $BASTION_NAME"
+    echo "OCID: $BASTION_OCID"
+    echo "State: $BASTION_STATE"
+    echo "========================================"
+    echo "Use these commands to manage this bastion:"
+    echo "$0 list session -b $BASTION_OCID"
+    echo "$0 show bastion -b $BASTION_OCID"
+    echo "========================================"
+}
+
+#
+# CREATE SESSION FUNCTIONS
+#
+
+# Function to show create session usage
+show_create_session_usage() {
+    echo "Usage: $0 create session [options]"
+    echo "Options:"
+    echo "  -b, --bastion OCID         Bastion OCID (required)"
+    echo "  -n, --name NAME            Session display name (required)"
+    echo "  -t, --target-ip IP         Target private IP address (required)"
+    echo "  -p, --port PORT            Target port (default: 22)"
+    echo "  --type TYPE                Session type (SSH or PORT_FORWARDING, default: SSH)"
+    echo "  --ttl SECONDS              Session time-to-live in seconds (default: 3600)"
+    echo "  -r, --region REGION        OCI Region (default: configured region)"
+    echo "  --profile PROFILE          OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  --debug                    Enable debug mode to show detailed information"
+    echo "  -h, --help                 Show this help message"
+}
+
+# Function to create a session
+create_session() {
+    echo "Create session functionality is planned for future implementation."
+    show_create_session_usage
+    exit 0
+    
+    # This is a placeholder for the future implementation
+    # The actual implementation would process arguments, validate input,
+    # and create a session using the OCI CLI
+}
+
+#
+# LIST BASTION FUNCTIONS
+#
+
+# Function to show list bastion usage
+show_list_bastion_usage() {
+    echo "Usage: $0 list bastion [options]"
+    echo "Options:"
+    echo "  -c, --compartment-id OCID  Compartment OCID to list bastions from (required)"
+    echo "  -r, --region REGION        OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE      OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  --all                      List all bastions in the tenancy (requires proper permissions)"
+    echo "  -h, --help                 Show this help message"
+}
+
+# Function to list bastions
+list_bastion() {
+    local all_compartments=false
+    
+    # Process arguments for list bastion command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -c|--compartment-id)
+                COMPARTMENT_OCID="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            -p|--profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            --all)
+                all_compartments=true
+                shift
+                ;;
+            -h|--help)
+                show_list_bastion_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for list bastion command: $1"
+                show_list_bastion_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$COMPARTMENT_OCID" ] && [ "$all_compartments" = false ]; then
+        echo "Error: Compartment ID (-c, --compartment-id) is required unless --all is specified."
+        show_list_bastion_usage
+        exit 1
+    fi
+    
+    # Validate OCID if provided
+    if [ -n "$COMPARTMENT_OCID" ]; then
+        validate_ocid "$COMPARTMENT_OCID" "Compartment"
+    fi
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # List bastions
+    echo "Listing bastions..."
+    if [ "$all_compartments" = true ]; then
+        echo "Querying all bastions across all accessible compartments"
+        BASTIONS=$(oci bastion bastion list \
+            --all \
+            --profile "$OCI_PROFILE" \
+            $region_param)
+    else
+        echo "Querying bastions in compartment: $COMPARTMENT_OCID"
+        BASTIONS=$(oci bastion bastion list \
+            --compartment-id "$COMPARTMENT_OCID" \
+            --all \
+            --profile "$OCI_PROFILE" \
+            $region_param)
+    fi
+    
+    # Check for errors
+    if [ $? -ne 0 ]; then
+        echo "Error listing bastions."
+        exit 1
+    fi
+    
+    # Count the number of bastions
+    BASTION_COUNT=$(echo "$BASTIONS" | jq '.data | length')
+    
+    if [ "$BASTION_COUNT" -eq 0 ]; then
+        echo "No bastions found."
+        exit 0
+    fi
+    
+    # Print table header
+    echo "=== Bastions ==="
+    printf "%-30s %-15s %-50s %-15s\n" \
+           "Name" "State" "OCID" "Region"
+    echo "-----------------------------------------------------------------------------------------------------"
+    
+    # Extract and display information for each bastion
+    echo "$BASTIONS" | jq -c '.data[]' | while read -r bastion; do
+        name=$(echo "$bastion" | jq -r '.name // "Unnamed"')
+        state=$(echo "$bastion" | jq -r '."lifecycle-state" // "Unknown"')
+        ocid=$(echo "$bastion" | jq -r '.id')
+        region=$(echo "$bastion" | jq -r '."region" // "Unknown"')
+        
+        # Print the table row
+        printf "%-30s %-15s %-50s %-15s\n" \
+               "${name:0:30}" "$state" "$ocid" "$region"
+    done
+    
+    echo ""
+    echo "Total bastions: $BASTION_COUNT"
+    echo ""
+    echo "To view detailed information for a specific bastion:"
+    echo "$0 show bastion -b BASTION_OCID"
+    echo ""
+    echo "To list sessions for a specific bastion:"
+    echo "$0 list session -b BASTION_OCID"
+}
+
+#
+# LIST SESSION FUNCTIONS
+#
+# Function to show list session usage
+show_list_session_usage() {
+    echo "Usage: $0 list session [options]"
+    echo "Options:"
+    echo "  -b, --bastion OCID    Bastion OCID (required)"
+    echo "  -r, --region REGION   OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  -h, --help            Show this help message"
+}
+
+# Function to list sessions
+list_session() {
+    # Process arguments for list session command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -b|--bastion)
+                BASTION_OCID="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            -p|--profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_list_session_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for list session command: $1"
+                show_list_session_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$BASTION_OCID" ]; then
+        echo "Error: Bastion OCID (-b, --bastion) is required."
+        show_list_session_usage
+        exit 1
+    fi
+    
+    # Validate bastion OCID
+    validate_ocid "$BASTION_OCID" "Bastion"
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # List bastion sessions
+    echo "Querying sessions for bastion: $BASTION_OCID"
+    echo "Using OCI profile: $OCI_PROFILE"
+    if [ -n "$OCI_REGION" ]; then
+        echo "Region: $OCI_REGION"
+    else
+        echo "Region: [default from profile]"
+    fi
+    
+    # Retrieve sessions using OCI CLI
+    SESSIONS=$(oci bastion session list \
+        --bastion-id "$BASTION_OCID" \
+        $region_param \
+        --all \
+        --profile "$OCI_PROFILE")
+    
+    # Check for errors
+    if [ $? -ne 0 ]; then
+        echo "Error querying bastion sessions."
+        exit 1
+    fi
+    
+    # Count the number of sessions
+    SESSION_COUNT=$(echo "$SESSIONS" | jq '.data | length')
+    
+    if [ "$SESSION_COUNT" -eq 0 ]; then
+        echo "No active sessions found for this bastion."
+        exit 0
+    fi
+    
+    # Print table header
+    echo "=== Bastion Sessions ==="
+    printf "%-25s %-30s %-10s %-15s %-15s %-25s\n" \
+           "Name" "Target Resource" "Port" "State" "TTL (hours)" "Session ID (short)"
+    echo "--------------------------------------------------------------------------------------------------------"
+    
+    # Extract and display information for each session
+    echo "$SESSIONS" | jq -c '.data[]' | while read -r session; do
+        name=$(echo "$session" | jq -r '."display-name" // "Unnamed"')
+        target=$(echo "$session" | jq -r '."target-resource-details"."target-resource-display-name" // "N/A"')
+        port=$(echo "$session" | jq -r '."target-resource-details"."target-resource-port" // "N/A"')
+        state=$(echo "$session" | jq -r '."lifecycle-state" // "Unknown"')
+        ttl=$(echo "$session" | jq -r '."session-ttl-in-seconds" // "0"')
+        id=$(echo "$session" | jq -r '.id')
+        
+        # Convert TTL from seconds to hours - more reliable method
+        if [ "$ttl" != "null" ] && [ "$ttl" != "0" ]; then
+            # Use basic bash arithmetic instead of bc
+            ttl_hours=$(printf "%.2f" $(echo "$ttl / 3600" | awk '{print $1}'))
+        else
+            ttl_hours="N/A"
+        fi
+        
+        # Get the last 8 characters of the ID for display
+        short_id="${id: -8}"
+        
+        # Print the table row
+        printf "%-25s %-30s %-10s %-15s %-15s %-25s\n" \
+               "${name:0:25}" "${target:0:30}" "$port" "$state" "$ttl_hours" "$short_id"
+    done
+    
+    echo ""
+    echo "Total sessions: $SESSION_COUNT"
+    echo ""
+    echo "To view complete details for a specific session:"
+    echo "$0 show session -b $BASTION_OCID -s SESSION_NAME"
+}
+
+# Function to show list session usage
+show_list_session_usage() {
+    echo "Usage: $0 list session [options]"
+    echo "Options:"
+    echo "  -b, --bastion OCID    Bastion OCID (required)"
+    echo "  -r, --region REGION   OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  -h, --help            Show this help message"
+}
+
+# Function to list sessions
+list_session() {
+    # Process arguments for list session command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -b|--bastion)
+                BASTION_OCID="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            -p|--profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_list_session_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for list session command: $1"
+                show_list_session_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$BASTION_OCID" ]; then
+        echo "Error: Bastion OCID (-b, --bastion) is required."
+        show_list_session_usage
+        exit 1
+    fi
+    
+    # Validate bastion OCID
+    validate_ocid "$BASTION_OCID" "Bastion"
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # List bastion sessions
+    echo "Querying sessions for bastion: $BASTION_OCID"
+    echo "Using OCI profile: $OCI_PROFILE"
+    if [ -n "$OCI_REGION" ]; then
+        echo "Region: $OCI_REGION"
+    else
+        echo "Region: [default from profile]"
+    fi
+    
+    # Retrieve sessions using OCI CLI
+    SESSIONS=$(oci bastion session list \
+        --bastion-id "$BASTION_OCID" \
+        $region_param \
+        --all \
+        --profile "$OCI_PROFILE")
+    
+    # Check for errors
+    if [ $? -ne 0 ]; then
+        echo "Error querying bastion sessions."
+        exit 1
+    fi
+    
+    # Count the number of sessions
+    SESSION_COUNT=$(echo "$SESSIONS" | jq '.data | length')
+    
+    if [ "$SESSION_COUNT" -eq 0 ]; then
+        echo "No active sessions found for this bastion."
+        exit 0
+    fi
+    
+    # Print table header
+    echo "=== Bastion Sessions ==="
+    printf "%-25s %-30s %-10s %-15s %-15s %-25s\n" \
+           "Name" "Target Resource" "Port" "State" "TTL (hours)" "Session ID (short)"
+    echo "--------------------------------------------------------------------------------------------------------"
+    
+    # Extract and display information for each session
+    echo "$SESSIONS" | jq -c '.data[]' | while read -r session; do
+        name=$(echo "$session" | jq -r '."display-name" // "Unnamed"')
+        target=$(echo "$session" | jq -r '."target-resource-details"."target-resource-display-name" // "N/A"')
+        port=$(echo "$session" | jq -r '."target-resource-details"."target-resource-port" // "N/A"')
+        state=$(echo "$session" | jq -r '."lifecycle-state" // "Unknown"')
+        ttl=$(echo "$session" | jq -r '."session-ttl-in-seconds" // "0"')
+        id=$(echo "$session" | jq -r '.id')
+        
+        # Convert TTL from seconds to hours - more reliable method
+        if [ "$ttl" != "null" ] && [ "$ttl" != "0" ]; then
+            # Use basic bash arithmetic instead of bc
+            ttl_hours=$(printf "%.2f" $(echo "$ttl / 3600" | awk '{print $1}'))
+        else
+            ttl_hours="N/A"
+        fi
+        
+        # Get the last 8 characters of the ID for display
+        short_id="${id: -8}"
+        
+        # Print the table row
+        printf "%-25s %-30s %-10s %-15s %-15s %-25s\n" \
+               "${name:0:25}" "${target:0:30}" "$port" "$state" "$ttl_hours" "$short_id"
+    done
+    
+    echo ""
+    echo "Total sessions: $SESSION_COUNT"
+    echo ""
+    echo "To view complete details for a specific session:"
+    echo "$0 show session -b $BASTION_OCID -s SESSION_NAME"
+}
+
+#
+# SHOW BASTION FUNCTIONS
+#
+
+# Function to show show bastion usage
+show_show_bastion_usage() {
+    echo "Usage: $0 show bastion [options]"
+    echo "Options:"
+    echo "  -b, --bastion OCID    Bastion OCID (required)"
+    echo "  -r, --region REGION   OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  -h, --help            Show this help message"
+}
+
+# Function to show bastion details
+show_bastion() {
+    # Process arguments for show bastion command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -b|--bastion)
+                BASTION_OCID="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            -p|--profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_show_bastion_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for show bastion command: $1"
+                show_show_bastion_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$BASTION_OCID" ]; then
+        echo "Error: Bastion OCID (-b, --bastion) is required."
+        show_show_bastion_usage
+        exit 1
+    fi
+    
+    # Validate bastion OCID
+    validate_ocid "$BASTION_OCID" "Bastion"
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # Get bastion details
+    echo "Retrieving details for bastion: $BASTION_OCID"
+    BASTION_INFO=$(oci bastion bastion get \
+        --bastion-id "$BASTION_OCID" \
+        --profile "$OCI_PROFILE" \
+        $region_param)
+    
+    # Check for errors
+    if [ $? -ne 0 ]; then
+        echo "Error retrieving bastion details."
+        exit 1
+    fi
+    
+    # Display bastion details
+    echo "========================================"
+    echo "Bastion Details"
+    echo "========================================"
+    
+    # Extract and format basic information
+    name=$(echo "$BASTION_INFO" | jq -r '.data.name')
+    state=$(echo "$BASTION_INFO" | jq -r '.data."lifecycle-state"')
+    compartment=$(echo "$BASTION_INFO" | jq -r '.data."compartment-id"')
+    time_created=$(echo "$BASTION_INFO" | jq -r '.data."time-created"')
+    subnet=$(echo "$BASTION_INFO" | jq -r '.data."target-subnet-id"')
+    bastion_type=$(echo "$BASTION_INFO" | jq -r '.data."bastion-type"')
+    max_ttl=$(echo "$BASTION_INFO" | jq -r '.data."max-session-ttl-in-seconds"')
+    dns_proxy=$(echo "$BASTION_INFO" | jq -r '.data."dns-proxy-status"')
+    
+    # Convert TTL from seconds to hours
+    max_ttl_hours=$(printf "%.2f" $(echo "$max_ttl / 3600" | awk '{print $1}'))
+    
+    # Display formatted information
+    echo "Name: $name"
+    echo "State: $state"
+    echo "OCID: $BASTION_OCID"
+    echo "Compartment: $compartment"
+    echo "Created: $time_created"
+    echo "Target Subnet: $subnet"
+    echo "Type: $bastion_type"
+    echo "Max Session TTL: $max_ttl seconds ($max_ttl_hours hours)"
+    echo "DNS Proxy Status: $dns_proxy"
+    
+    # Extract and display client CIDR list
+    echo ""
+    echo "Client CIDR Blocks:"
+    echo "$BASTION_INFO" | jq -r '.data."client-cidr-block-allow-list"[]' | while read -r cidr; do
+        echo "  - $cidr"
+    done
+    
+    # Show additional info if available
+    if [ "$(echo "$BASTION_INFO" | jq 'has("defined-tags")')" == "true" ]; then
+        echo ""
+        echo "Defined Tags:"
+        echo "$BASTION_INFO" | jq -r '.data."defined-tags"'
+    fi
+    
+    if [ "$(echo "$BASTION_INFO" | jq 'has("freeform-tags")')" == "true" ]; then
+        echo ""
+        echo "Freeform Tags:"
+        echo "$BASTION_INFO" | jq -r '.data."freeform-tags"'
+    fi
+    
+    echo ""
+    echo "========================================"
+    echo "For session management, use:"
+    echo "$0 list session -b $BASTION_OCID"
+    echo "$0 create session -b $BASTION_OCID -n SESSION_NAME -t TARGET_IP"
+    echo "========================================"
+}
+
+#
+# SHOW SESSION FUNCTIONS
+#
+
+# Function to show show session usage
+show_show_session_usage() {
+    echo "Usage: $0 show session [options]"
+    echo "Options:"
+    echo "  -b, --bastion OCID    Bastion OCID (required)"
+    echo "  -s, --session NAME    Session name (required)"
+    echo "  -i, --session-id OCID Session OCID (alternative to -s)"
+    echo "  -r, --region REGION   OCI Region (default: configured region)"
+    echo "  -p, --profile PROFILE OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  -h, --help            Show this help message"
+}
+
+# Function to show session details
+show_session() {
+    # Process arguments for show session command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -b|--bastion)
+                BASTION_OCID="$2"
+                shift 2
+                ;;
+            -s|--session)
+                SHOW_SESSION="$2"
+                shift 2
+                ;;
+            -i|--session-id)
+                SESSION_OCID="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            -p|--profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_show_session_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for show session command: $1"
+                show_show_session_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$BASTION_OCID" ]; then
+        echo "Error: Bastion OCID (-b, --bastion) is required."
+        show_show_session_usage
+        exit 1
+    fi
+    
+    if [ -z "$SHOW_SESSION" ] && [ -z "$SESSION_OCID" ]; then
+        echo "Error: Either session name (-s, --session) or session OCID (-i, --session-id) is required."
+        show_show_session_usage
+        exit 1
+    fi
+    
+    # Validate bastion OCID
+    validate_ocid "$BASTION_OCID" "Bastion"
+    if [ -n "$SESSION_OCID" ]; then
+        validate_ocid "$SESSION_OCID" "Session"
+    fi
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # Get session information
+    if [ -n "$SESSION_OCID" ]; then
+        # Get session directly by OCID
+        echo "Retrieving session with OCID: $SESSION_OCID"
+        SESSION_INFO=$(oci bastion session get \
+            --session-id "$SESSION_OCID" \
+            --profile "$OCI_PROFILE" \
+            $region_param)
+        
+        if [ $? -ne 0 ]; then
+            echo "Error retrieving session details."
+            exit 1
+        fi
+        
+        # Display the session details
+        echo "$SESSION_INFO" | jq '.'
+        exit 0
+    else
+        # First list all sessions and find the one by name
+        echo "Retrieving session '$SHOW_SESSION' from bastion: $BASTION_OCID"
+        
+        # Get all sessions
+        SESSIONS=$(oci bastion session list \
+            --bastion-id "$BASTION_OCID" \
+            $region_param \
+            --all \
+            --profile "$OCI_PROFILE")
+        
+        if [ $? -ne 0 ]; then
+            echo "Error retrieving sessions."
+            exit 1
+        fi
+        
+        # Find the session by name
+        SESSION_DETAILS=$(echo "$SESSIONS" | jq -c --arg name "$SHOW_SESSION" '.data[] | select(."display-name" == $name)')
+        
+        if [ -z "$SESSION_DETAILS" ]; then
+            echo "No session found with name: $SHOW_SESSION"
+            exit 1
+        fi
+        
+        # Display detailed information in a formatted way
+        session_id=$(echo "$SESSION_DETAILS" | jq -r '.id')
+        display_name=$(echo "$SESSION_DETAILS" | jq -r '."display-name"')
+        state=$(echo "$SESSION_DETAILS" | jq -r '."lifecycle-state"')
+        time_created=$(echo "$SESSION_DETAILS" | jq -r '."time-created"')
+        ttl=$(echo "$SESSION_DETAILS" | jq -r '."session-ttl-in-seconds"')
+        target_resource=$(echo "$SESSION_DETAILS" | jq -r '."target-resource-details"."target-resource-display-name" // "N/A"')
+        target_ip=$(echo "$SESSION_DETAILS" | jq -r '."target-resource-details"."target-resource-private-ip-address" // "N/A"')
+        target_port=$(echo "$SESSION_DETAILS" | jq -r '."target-resource-details"."target-resource-port" // "N/A"')
+        session_type=$(echo "$SESSION_DETAILS" | jq -r '.type // "Unknown"')
+        
+        # Convert TTL from seconds to hours
+        ttl_hours=$(printf "%.2f" $(echo "$ttl / 3600" | awk '{print $1}'))
+        
+        echo "========================================"
+        echo "Session Details"
+        echo "========================================"
+        echo "Name: $display_name"
+        echo "ID: $session_id"
+        echo "State: $state"
+        echo "Created: $time_created"
+        echo "Type: $session_type"
+        echo "TTL: $ttl seconds ($ttl_hours hours)"
+        echo ""
+        echo "Target Resource: $target_resource"
+        echo "Target IP: $target_ip"
+        echo "Target Port: $target_port"
+        echo "========================================"
+        
+        # Show SSH command for SSH sessions if active
+        if [ "$session_type" == "MANAGED_SSH" ] && [ "$state" == "ACTIVE" ]; then
+            ssh_command=$(echo "$SESSION_DETAILS" | jq -r '.["ssh-metadata"]["command"] // "N/A"')
+            if [ "$ssh_command" != "N/A" ] && [ "$ssh_command" != "null" ]; then
+                echo ""
+                echo "SSH Command:"
+                echo "$ssh_command"
+                echo ""
+            fi
+        fi
+    fi
+}
+
+#
+# HELP FUNCTIONS
+#
+
+# Function to show help for a specific command
+show_help() {
+    if [ $# -eq 0 ]; then
+        show_main_usage
+        exit 0
+    fi
+    
+    help_verb="$1"
+    shift
+    
+    if [ $# -eq 0 ]; then
+        case "$help_verb" in
+            create)
+                echo "Available create commands:"
+                echo "  $0 create bastion    - Create a new bastion"
+                echo "  $0 create session    - Create a new session on a bastion"
+                echo ""
+                echo "For more details, use: $0 help create <object>"
+                ;;
+            list)
+                echo "Available list commands:"
+                echo "  $0 list bastion    - List all bastions in a compartment"
+                echo "  $0 list session    - List all sessions for a bastion"
+                echo ""
+                echo "For more details, use: $0 help list <object>"
+                ;;
+            show)
+                echo "Available show commands:"
+                echo "  $0 show bastion    - Show detailed information for a bastion"
+                echo "  $0 show session    - Show detailed information for a session"
+                echo ""
+                echo "For more details, use: $0 help show <object>"
+                ;;
+            *)
+                echo "Unknown verb: $help_verb"
+                show_main_usage
+                exit 1
+                ;;
+        esac
+        exit 0
+    fi
+    
+    help_object="$1"
+    
+    case "$help_verb $help_object" in
+        "create bastion")
+            show_create_bastion_usage
+            ;;
+        "create session")
+            show_create_session_usage
+            ;;
+        "list bastion")
+            show_list_bastion_usage
+            ;;
+        "list session")
+            show_list_session_usage
+            ;;
+        "show bastion")
+            show_show_bastion_usage
+            ;;
+        "show session")
+            show_show_session_usage
+            ;;
+        *)
+            echo "Unknown command: $help_verb $help_object"
+            show_main_usage
+            exit 1
+            ;;
+    esac
+}
+
+# Main script execution
+
+# Check if at least one command is provided
+if [ $# -eq 0 ]; then
+    echo "Error: No command specified."
+    show_main_usage
+    exit 1
+fi
+
+# Parse command
+VERB="$1"
+shift
+
+if [ $# -eq 0 ] && [ "$VERB" != "help" ]; then
+    echo "Error: No object specified."
+    show_main_usage
+    exit 1
+fi
+
+# Get the object for most commands
+if [ "$VERB" != "help" ]; then
+    OBJECT="$1"
+    shift
+fi
+
+# Execute the appropriate function based on verb and object
+case "$VERB" in
+    create)
+        case "$OBJECT" in
+            bastion)
+                create_bastion "$@"
+                ;;
+            session)
+                create_session "$@"
+                ;;
+            *)
+                echo "Error: Unknown object '$OBJECT' for verb 'create'"
+                echo "Valid objects: bastion, session"
+                exit 1
+                ;;
+        esac
+        ;;
+    list)
+        case "$OBJECT" in
+            bastion)
+                list_bastion "$@"
+                ;;
+            session)
+                list_session "$@"
+                ;;
+            *)
+                echo "Error: Unknown object '$OBJECT' for verb 'list'"
+                echo "Valid objects: bastion, session"
+                exit 1
+                ;;
+        esac
+        ;;
+    show)
+        case "$OBJECT" in
+            bastion)
+                show_bastion "$@"
+                ;;
+            session)
+                show_session "$@"
+                ;;
+            *)
+                echo "Error: Unknown object '$OBJECT' for verb 'show'"
+                echo "Valid objects: bastion, session"
+                exit 1
+                ;;
+        esac
+        ;;
+    help)
+        show_help "$@"
+        ;;
+    *)
+        echo "Error: Unknown verb '$VERB'"
+        show_main_usage
+        exit 1
+        ;;
+esac
+
+exit 0
