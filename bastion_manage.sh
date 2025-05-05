@@ -3,12 +3,13 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: bastion_manage.sh
-# Version: 1.2.1
+# Version: 1.2.4
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Comprehensive OCI Cloud bastion management script
 #              Creates, lists and manages OCI bastions and sessions
 #              Compatible with OCI CLI
+#              Now with SSH config integration for easy access
 #
 # =================================================================
 # OCI Bastion Script Management Tool
@@ -25,6 +26,7 @@
 #   - Listing bastions in a compartment
 #   - Listing active sessions for a bastion
 #   - Showing detailed information about bastions and sessions
+#   - Automatic SSH config generation for easy access to targets
 #
 #   NOTE: This script uses the OCI CLI authentication configuration
 #   located at ~/.oci/config for authentication with OCI services.
@@ -76,6 +78,12 @@
 #   --key-type TYPE            Key type (PUB or PEM, default: PUB)
 #   --key-file PATH            Public key file (default: ~/.ssh/id_rsa.pub)
 #
+# SSH CONFIG OPTIONS:
+#   --ssh-config-dir DIR       Directory for SSH config files (default: ~/.ssh/config.d)
+#   --ssh-identity-file FILE   SSH identity file (default: ~/.ssh/id_rsa)
+#   --ssh-config-enabled       Enable SSH config generation (default)
+#   --ssh-config-disabled      Disable SSH config generation
+#
 # EXAMPLES:
 #   # Create a new bastion: (requires compartment OCID, subnet OCID)
 #   ./bastion_manage.sh create bastion -c ocid1.compartment.oc1..example -n my-bastion -s ocid1.subnet.oc1.example
@@ -117,32 +125,39 @@
 
 # Global variables as specified
 OCI_REGION="sa-santiago-1"
-COMPARTMENT_OCID="ocid1.compartment.oc1..aaaaaaaa"
-TARGET_SUBNET_OCID="ocid1.subnet.oc1.sa-santiago-1.aaaaaaaa"
-BASTION_NAME="bastion04"
+COMPARTMENT_OCID="ocid1.compartment.oc1..aaaaaaaajzeqkclqbyj7pwwl5wjqefwmwttctrmzzrzfadci7anrwwqtgcvq"
+TARGET_SUBNET_OCID="ocid1.subnet.oc1.sa-santiago-1.aaaaaaaaxgdlro2hsj5h3t6ikzo7fs7behz63jhwxpvvejhhle5qcpfjrb2a"
+BASTION_NAME="bastion01"
 CLIENT_CIDR="0.0.0.0/0"
 MAX_SESSION_TTL=10800
 OCI_PROFILE="DEFAULT"
-BASTION_OCID="ocid1.bastion.oc1.sa-santiago-1.amaaaaaa"
+BASTION_OCID=""
 SHOW_SESSION=""
 
 # Additional variables for session management
 SESSION_NAME="session04"
-TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1.anzwgljr"
-TARGET_OS_USER="opc"
+TARGET_RESOURCE_OCID="ocid1.instance.oc1.sa-santiago-1.anzwgljrb4w7ojacpcovxr7zm7llulu5464z3twive5bept7bn3w7fc6swaq"
 TARGET_OS_USER="opc"
 PUBLIC_KEY_FILE="~/.ssh/carlmira.pub"
-TARGET_IP="10.0.1.224"
+TARGET_IP="10.0.1.243"
 TARGET_PORT=22
 SESSION_TYPE="SSH"
 SESSION_TTL=1800
 SESSION_OCID=""
 KEY_TYPE="PUB"
 
+# SSH config variables
+SSH_CONFIG_DIR="$HOME/.ssh/config.d"
+SSH_IDENTITY_FILE="$HOME/.ssh/carlmira"
+SSH_CONFIG_DOMAIN="host.bastion.%REGION%.oci.oraclecloud.com"  # %REGION% will be replaced automatically
+SSH_CONFIG_PREFIX="oci_bastion"                                # Prefix for configuration files
+SSH_CONFIG_ENABLED=true                                        # Flag to enable/disable this feature
+
 # Additional required variables
 DEBUG_MODE=false
 VERB=""
 OBJECT=""
+
 
 # Check if OCI config exists
 if [ ! -f ~/.oci/config ]; then
@@ -226,6 +241,279 @@ verify_oci_auth() {
 }
 
 #
+# SSH CONFIG FUNCTIONS
+#
+
+# Function to ensure SSH config directories exist
+ensure_ssh_config_dirs() {
+    # Ensure ~/.ssh exists
+    if [ ! -d "$HOME/.ssh" ]; then
+        debug "Creating ~/.ssh directory"
+        mkdir -p "$HOME/.ssh"
+        chmod 700 "$HOME/.ssh"
+    fi
+    
+    # Ensure ~/.ssh/config exists
+    if [ ! -f "$HOME/.ssh/config" ]; then
+        debug "Creating empty ~/.ssh/config file"
+        touch "$HOME/.ssh/config"
+        chmod 600 "$HOME/.ssh/config"
+    fi
+    
+    # Ensure ~/.ssh/config.d directory exists
+    if [ ! -d "$SSH_CONFIG_DIR" ]; then
+        debug "Creating $SSH_CONFIG_DIR directory"
+        mkdir -p "$SSH_CONFIG_DIR"
+        chmod 700 "$SSH_CONFIG_DIR"
+    fi
+}
+
+# Function to ensure Include directive exists at the beginning of the main config file
+update_main_ssh_config() {
+    local config_file_name="${SSH_CONFIG_PREFIX}_$1"
+    local include_line="Include $SSH_CONFIG_DIR/${config_file_name}"
+    
+    # Convert to a form usable in grep (escape dots and other special chars)
+    local grep_pattern=$(echo "${config_file_name}" | sed 's/\./\\./g')
+    
+    # Check if the Include directive already exists
+    if grep -q "${grep_pattern}" "$HOME/.ssh/config"; then
+        debug "Include directive already exists in ~/.ssh/config"
+        
+        # Check if it's at the end of the file
+        if [ "$(tail -1 "$HOME/.ssh/config")" = "$include_line" ]; then
+            debug "Include directive found at the end of the file. Moving it to the beginning..."
+            
+            # Remove the line from the end
+            sed -i "/${grep_pattern}/d" "$HOME/.ssh/config"
+            
+            # Now continue with adding it to the beginning
+        else
+            # It exists but not at the end, so just return
+            return 0
+        fi
+    fi
+    
+    debug "Adding Include directive to the beginning of ~/.ssh/config"
+    
+    # Create a temporary file
+    local temp_file=$(mktemp)
+    
+    # First line: OCI Bastion header if it doesn't exist
+    echo "# OCI Bastion Sessions" > "$temp_file"
+    
+    # Second line: The Include directive
+    echo "$include_line" >> "$temp_file"
+    
+    # Third line: blank line
+    echo "" >> "$temp_file"
+    
+    # Now append the rest of the SSH config file
+    # But first, check if the first line is already the OCI Bastion header
+    local first_line=$(head -1 "$HOME/.ssh/config")
+    if [ "$first_line" = "# OCI Bastion Sessions" ]; then
+        # Skip the first line when appending
+        tail -n +2 "$HOME/.ssh/config" >> "$temp_file"
+    else
+        cat "$HOME/.ssh/config" >> "$temp_file"
+    fi
+    
+    # Replace the original file with our temp file
+    cp "$temp_file" "$HOME/.ssh/config"
+    rm "$temp_file"
+    
+    # Fix permissions
+    chmod 600 "$HOME/.ssh/config"
+    
+    debug "Added include directive at the beginning of ~/.ssh/config: $include_line"
+    
+    return 0
+}
+
+# Function to create SSH config file for a bastion session
+create_ssh_config_file() {
+    local session_name="$1"
+    local session_id="$2"
+    local target_ip="$3"
+    local target_port="${4:-22}"
+    local bastion_host="$5"
+    local identity_file="${6:-$SSH_IDENTITY_FILE}"
+    local target_user="${7:-opc}"
+    
+    # Create unique config file name based on session ID (last 8 chars)
+    local short_id="${session_id: -8}"
+    local config_file_name="${SSH_CONFIG_PREFIX}_${short_id}"
+    local config_file_path="$SSH_CONFIG_DIR/$config_file_name"
+    
+
+    # Validate that we have a proper bastion_host
+    if [ -z "$bastion_host" ]; then
+        echo "Error: Cannot create SSH config without bastion host."
+        return 1
+    fi
+
+    # Remove any trailing quotes or special characters
+    bastion_host=$(echo "$bastion_host" | tr -d '"' | tr -d "'" | tr -d ';')
+
+    # For security, basic validation of parameters
+    if [[ ! "$session_id" =~ ^ocid1\.[a-z]+\.[a-z0-9\.-]+\.[a-z0-9\.-]+\..+ ]]; then
+        echo "Warning: Session ID doesn't appear to be a valid OCID format."
+    fi
+    
+    if [[ ! "$target_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Warning: Target IP doesn't appear to be in valid format. Using anyway."
+    fi
+    
+    debug "Creating SSH config file: $config_file_path"
+    
+    # Create the config file with all necessary options
+    cat > "$config_file_path" << EOF
+# OCI Bastion SSH Config for Session: $session_name (ID: $short_id)
+# Created: $(date)
+# Target: $target_ip:$target_port
+
+Host bastion-$short_id
+    HostName $bastion_host
+    User $session_id
+    IdentityFile $identity_file
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ServerAliveInterval 60
+    LogLevel ERROR
+
+Host target-$short_id
+    HostName $target_ip
+    User $target_user
+    Port $target_port
+    ProxyJump bastion-$short_id
+    IdentityFile $identity_file
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ServerAliveInterval 60
+    LogLevel ERROR
+EOF
+
+    # Set proper permissions
+    chmod 600 "$config_file_path"
+    
+    # Update the main SSH config to include this file
+    update_main_ssh_config "$short_id"
+    
+    echo "SSH config created: $config_file_path"
+    echo "You can connect directly using: ssh target-$short_id"
+    
+    return 0
+}
+
+
+# Function to extract bastion host from SSH command
+extract_bastion_host() {
+    local ssh_command="$1"
+    
+    # For commands with ProxyCommand, extract the host from inside it
+    if [[ "$ssh_command" == *"ProxyCommand"* ]]; then
+        # Extract the full hostname after the @ symbol and before any space, quote or other char
+        local host=$(echo "$ssh_command" | grep -o -E "@[^[:space:]\"]+[[:space:]]+" | sed 's/^@//g' | sed 's/[[:space:]]*$//g' | head -1)
+        
+        # If we found a host, return it
+        if [ -n "$host" ]; then
+            echo "$host"
+            return 0
+        fi
+    fi
+    
+    # If we get here, try a more general approach
+    # Look for a pattern that resembles a bastion hostname
+    local host=$(echo "$ssh_command" | grep -o -E "host\.bastion\.[a-z0-9\.-]+\.oci\.oraclecloud\.com" | head -1)
+    
+    # If found, return it
+    if [ -n "$host" ]; then
+        echo "$host"
+        return 0
+    fi
+    
+    # Last resort fallback - try to get anything that might be a hostname
+    local host=$(echo "$ssh_command" | grep -o -E "[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}" | grep -v "ssh-" | head -1)
+    
+    echo "$host"
+}
+
+
+# Function to extract user ID from SSH command
+extract_user_id() {
+    local ssh_command="$1"
+    
+    # Try to extract user from an SSH command
+    local user=$(echo "$ssh_command" | grep -o -E "[^[:space:]]+@" | sed 's/@$//')
+    
+    echo "$user"
+}
+
+
+# Function to setup SSH config for a session
+setup_ssh_config() {
+    local session_name="$1"
+    local session_id="$2"
+    local ssh_command="$3"
+    local target_ip="$4"
+    local target_port="${5:-22}"
+    local target_user="${6:-opc}"
+    
+    # Only proceed if SSH config is enabled
+    if [ "$SSH_CONFIG_ENABLED" != "true" ]; then
+        debug "SSH config generation is disabled."
+        return 0
+    fi
+    
+    # Ensure directories exist
+    ensure_ssh_config_dirs
+    
+    # Extract bastion host from SSH command
+    local bastion_host=$(extract_bastion_host "$ssh_command")
+    
+    # If we couldn't extract the host, we can't continue
+    if [ -z "$bastion_host" ]; then
+        echo "Warning: Could not extract bastion host from SSH command."
+        echo "SSH config file was not created."
+        return 1
+    fi
+    
+    # Debug the extracted host
+    debug "Extracted bastion host: $bastion_host"
+    
+    # Extract user ID if not provided (for completeness)
+    if [ -z "$session_id" ]; then
+        session_id=$(extract_user_id "$ssh_command")
+        if [ -z "$session_id" ]; then
+            echo "Warning: Could not extract session ID from SSH command."
+            echo "SSH config file was not created."
+            return 1
+        fi
+    fi
+    
+    # Debug the extracted user ID
+    debug "Using session ID: $session_id"
+    
+    # Create the SSH config file
+    create_ssh_config_file "$session_name" "$session_id" "$target_ip" "$target_port" "$bastion_host" "$SSH_IDENTITY_FILE" "$target_user"
+    
+    return $?
+}
+
+
+
+# Function to show SSH config options in help
+show_ssh_config_options() {
+    echo "SSH Config Options:"
+    echo "  --ssh-config-dir DIR        SSH config directory (default: $SSH_CONFIG_DIR)"
+    echo "  --ssh-identity-file FILE    SSH identity file (default: $SSH_IDENTITY_FILE)"
+    echo "  --ssh-config-domain DOMAIN  SSH config domain (default: $SSH_CONFIG_DOMAIN)"
+    echo "  --ssh-config-prefix PREFIX  SSH config file prefix (default: $SSH_CONFIG_PREFIX)"
+    echo "  --ssh-config-enabled        Enable SSH config generation (default: $SSH_CONFIG_ENABLED)"
+    echo "  --ssh-config-disabled       Disable SSH config generation"
+}
+
+#
 # CREATE BASTION FUNCTIONS
 #
 
@@ -245,7 +533,6 @@ show_create_bastion_usage() {
     echo "  -h, --help                 Show this help message"
 }
 
-# Function to create a bastion
 # Function to create a bastion
 create_bastion() {
     # Process arguments for create bastion command
@@ -514,6 +801,8 @@ show_create_session_usage() {
     echo "  --profile PROFILE          OCI Profile to use (default: $OCI_PROFILE)"
     echo "  --debug                    Enable debug mode to show detailed information"
     echo "  -h, --help                 Show this help message"
+    echo ""
+    show_ssh_config_options
 }
 
 
@@ -570,6 +859,30 @@ create_session() {
             --profile)
                 OCI_PROFILE="$2"
                 shift 2
+                ;;
+            --ssh-config-dir)
+                SSH_CONFIG_DIR="$2"
+                shift 2
+                ;;
+            --ssh-identity-file)
+                SSH_IDENTITY_FILE="$2"
+                shift 2
+                ;;
+            --ssh-config-domain)
+                SSH_CONFIG_DOMAIN="$2"
+                shift 2
+                ;;
+            --ssh-config-prefix)
+                SSH_CONFIG_PREFIX="$2"
+                shift 2
+                ;;
+            --ssh-config-enabled)
+                SSH_CONFIG_ENABLED=true
+                shift
+;;
+            --ssh-config-disabled)
+                SSH_CONFIG_ENABLED=false
+                shift
                 ;;
             --debug)
                 DEBUG_MODE=true
@@ -890,15 +1203,31 @@ create_session() {
         echo ""
     fi
 
-
-
-    
     # Show connection information based on session type
     if [ "$SESSION_TYPE" = "SSH" ]; then
         SSH_COMMAND=$(echo "$SESSION_INFO" | jq -r '.data["ssh-metadata"]["command"] // "N/A"')
         if [ "$SSH_COMMAND" != "N/A" ] && [ "$SSH_COMMAND" != "null" ]; then
             echo "SSH Command:"
             echo "$SSH_COMMAND"
+            
+            # Setup SSH config if enabled
+            if [ "$SSH_CONFIG_ENABLED" = "true" ]; then
+                # Extract session ID from the SSH command or metadata
+                local extracted_session_id=$(echo "$SESSION_INFO" | jq -r '.data.id // ""')
+                
+                echo ""
+                echo "Setting up SSH config..."
+                setup_ssh_config "$SESSION_NAME" "$extracted_session_id" "$SSH_COMMAND" "$TARGET_IP" "$TARGET_PORT" "$TARGET_OS_USER"
+                
+                # Get the short ID for user reference
+                local short_id="${extracted_session_id: -8}"
+                if [ -n "$short_id" ]; then
+                    echo ""
+                    echo "================ SSH CONFIG CREATED ================"
+                    echo "You can now connect directly using: ssh target-$short_id"
+                    echo "====================================================="
+                fi
+            fi
         else
             echo "Connection information is not available yet."
             echo "Please run the following command to get connection details:"
@@ -906,8 +1235,20 @@ create_session() {
         fi
     else
         echo "Port Forwarding Session created."
-        echo "Please run the following command to get connection details:"
-        echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
+        
+        # For Port Forwarding, we should extract additional connection details if available
+        local local_port=$(echo "$SESSION_INFO" | jq -r '.data["port-forwarding-metadata"]["local-port"] // "N/A"')
+        if [ "$local_port" != "N/A" ] && [ "$local_port" != "null" ]; then
+            echo ""
+            echo "============ PORT FORWARDING DETAILS ============"
+            echo "Local Port: $local_port"
+            echo "Target: $TARGET_IP:$TARGET_PORT"
+            echo "To connect, use: localhost:$local_port"
+            echo "================================================="
+        else
+            echo "Please run the following command to get connection details:"
+            echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
+        fi
     fi
     
     echo "========================================"
@@ -1303,8 +1644,7 @@ show_bastion() {
         show_show_bastion_usage
         exit 1
     fi
-    
-    # Validate bastion OCID
+# Validate bastion OCID
     validate_ocid "$BASTION_OCID" "Bastion"
     
     # Prepare region parameter
@@ -1397,6 +1737,8 @@ show_show_session_usage() {
     echo "  -r, --region REGION      OCI Region (default: configured region)"
     echo "  -p, --profile PROFILE    OCI Profile to use (default: $OCI_PROFILE)"
     echo "  -h, --help               Show this help message"
+    echo ""
+    show_ssh_config_options
 }
 
 # Function to show session details
@@ -1424,6 +1766,30 @@ show_session() {
             -p|--profile)
                 OCI_PROFILE="$2"
                 shift 2
+                ;;
+            --ssh-config-dir)
+                SSH_CONFIG_DIR="$2"
+                shift 2
+                ;;
+            --ssh-identity-file)
+                SSH_IDENTITY_FILE="$2"
+                shift 2
+                ;;
+            --ssh-config-domain)
+                SSH_CONFIG_DOMAIN="$2"
+                shift 2
+                ;;
+            --ssh-config-prefix)
+                SSH_CONFIG_PREFIX="$2"
+                shift 2
+                ;;
+            --ssh-config-enabled)
+                SSH_CONFIG_ENABLED=true
+                shift
+                ;;
+            --ssh-config-disabled)
+                SSH_CONFIG_ENABLED=false
+                shift
                 ;;
             -h|--help)
                 show_show_session_usage
@@ -1540,6 +1906,51 @@ show_session() {
                 echo "SSH Command:"
                 echo "$ssh_command"
                 echo ""
+                
+                # Ask if user wants to setup SSH config
+                if [ "$SSH_CONFIG_ENABLED" = "true" ]; then
+                    read -p "Would you like to setup SSH config for easy access? (y/n): " setup_config
+                    if [[ $setup_config == [yY] || $setup_config == [yY][eE][sS] ]]; then
+                        # Extract target IP from session details
+                        local target_ip_from_session=$(echo "$SESSION_DETAILS" | jq -r '."target-resource-details"."target-resource-private-ip-address" // "N/A"')
+                        
+                        if [ "$target_ip_from_session" = "N/A" ] || [ "$target_ip_from_session" = "null" ]; then
+                            # If we can't extract from session details, try to extract from SSH command
+                            # This is a simplified approach and might need enhancement
+                            target_ip_from_session=$(echo "$ssh_command" | grep -o -E "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+                        fi
+                        
+                        if [ -z "$target_ip_from_session" ]; then
+                            read -p "Enter target IP address: " target_ip_from_session
+                        fi
+                        
+                        # Setup SSH config
+                        setup_ssh_config "$display_name" "$session_id" "$ssh_command" "$target_ip_from_session" "$target_port" "opc"
+                        
+                        # Get the short ID for user reference
+                        local short_id="${session_id: -8}"
+                        if [ -n "$short_id" ]; then
+                            echo ""
+                            echo "================ SSH CONFIG CREATED ================"
+                            echo "You can now connect directly using: ssh target-$short_id"
+                            echo "====================================================="
+                        fi
+                    fi
+                fi
+            fi
+        elif [ "$session_type" == "PORT_FORWARDING" ] && [ "$state" == "ACTIVE" ]; then
+            # Handle port forwarding details
+            port_forwarding_details=$(echo "$SESSION_DETAILS" | jq -r '.["port-forwarding-metadata"] // "N/A"')
+            if [ "$port_forwarding_details" != "N/A" ] && [ "$port_forwarding_details" != "null" ]; then
+                local_port=$(echo "$SESSION_DETAILS" | jq -r '.["port-forwarding-metadata"]["local-port"] // "N/A"')
+                if [ "$local_port" != "N/A" ] && [ "$local_port" != "null" ]; then
+                    echo ""
+                    echo "============ PORT FORWARDING DETAILS ============"
+                    echo "Local Port: $local_port"
+                    echo "Target: $target_ip:$target_port"
+                    echo "To connect, use: localhost:$local_port"
+                    echo "================================================="
+                fi
             fi
         fi
     fi
@@ -1701,4 +2112,3 @@ case "$VERB" in
 esac
 
 exit 0
-
