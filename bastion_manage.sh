@@ -3,11 +3,11 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: bastion_manage.sh
-# Version: 1.2.4
+# Version: 1.2.5
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Comprehensive OCI Cloud bastion management script
-#              Creates, lists and manages OCI bastions and sessions
+#              Lists and manages OCI bastions and sessions
 #              Compatible with OCI CLI
 #              Now with SSH config integration for easy access
 #
@@ -17,11 +17,10 @@
 #
 # DESCRIPTION:
 #   This script provides a unified interface to manage Oracle Cloud Infrastructure (OCI)
-#   bastion services. It combines creation, listing, and management of bastions
+#   bastion services. It combines listing and management of bastions
 #   and sessions in a single tool with hierarchical commands.
 #
 #   Features include:
-#   - Creating new bastion services with customizable parameters
 #   - Creating new bastion sessions (SSH and Port Forwarding)
 #   - Listing bastions in a compartment
 #   - Listing active sessions for a bastion
@@ -40,7 +39,7 @@
 #   ./bastion_manage.sh <verb> <object> [options]
 #
 # VERBS:
-#   create    Create a new resource (bastion or session)
+#   create    Create a new session
 #   list      List resources (bastions or sessions)
 #   show      Show detailed information about a resource
 #   help      Show help information
@@ -52,21 +51,13 @@
 # OPTIONS:
 #   For detailed options for each command, run:
 #   ./bastion_manage.sh help <verb> <object>
-#   Example: ./bastion_manage.sh help create bastion
+#   Example: ./bastion_manage.sh help create session
 #
 # COMMON PARAMETERS:
 #   -r, --region REGION        Specify OCI Region (default: configured region)
 #   -p, --profile PROFILE      Specify OCI Profile to use (default: DEFAULT)
 #   --debug                    Enable debug mode for detailed information
 #   -h, --help                 Show help for the specific command
-#
-# CREATE BASTION OPTIONS:
-#   -c, --compartment-id OCID  Compartment OCID (required)
-#   -n, --name NAME            Bastion name (required)
-#   -s, --target-subnet-id OCID Target subnet OCID (required)
-#   -v, --vcn-id OCID          VCN OCID (recommended for validation)
-#   --client-cidr CIDR         Client CIDR blocks allowed (default: 0.0.0.0/0)
-#   --max-session-ttl SECONDS  Maximum session TTL in seconds (default: 10800)
 #
 # CREATE SESSION OPTIONS:
 #   -b, --bastion-id OCID      Bastion OCID (required)
@@ -85,9 +76,6 @@
 #   --ssh-config-disabled      Disable SSH config generation
 #
 # EXAMPLES:
-#   # Create a new bastion: (requires compartment OCID, subnet OCID)
-#   ./bastion_manage.sh create bastion -c ocid1.compartment.oc1..example -n my-bastion -s ocid1.subnet.oc1.example
-#
 #   # Create a new SSH session: (requires VM OCID, target IP and OS user)
 #   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n my-session -t 10.0.0.25
 #
@@ -118,7 +106,7 @@
 #   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -i ocid1.bastionsession.oc1.region.xxxx
 #
 #   # Get help for a specific command:
-#   ./bastion_manage.sh help create bastion
+#   ./bastion_manage.sh help create session
 #   ./bastion_manage.sh help list session
 #
 
@@ -183,7 +171,7 @@ show_main_usage() {
     echo "Usage: $0 <verb> <object> [options]"
     echo ""
     echo "Verbs:"
-    echo "  create    Create a new resource (bastion or session)"
+    echo "  create    Create a new session"
     echo "  list      List resources (bastions or sessions)"
     echo "  show      Show detailed information about a resource"
     echo "  help      Show help information"
@@ -194,7 +182,7 @@ show_main_usage() {
     echo ""
     echo "For detailed help on a specific command:"
     echo "  $0 help <verb> <object>"
-    echo "  Example: $0 help create bastion"
+    echo "  Example: $0 help create session"
 }
 
 # Debug function
@@ -449,6 +437,98 @@ extract_user_id() {
     echo "$user"
 }
 
+# Function to clean up old SSH config files
+cleanup_old_ssh_configs() {
+    # Default max age in seconds (3 hours = 10800 seconds)
+    local max_age=${1:-10800}
+    local current_time=$(date +%s)
+    local configs_removed=0
+    local removed_files=()
+    
+    debug "Checking for stale SSH configs older than $max_age seconds..."
+    
+    # Ensure SSH config directories exist
+    ensure_ssh_config_dirs
+    
+    # Check if the config.d directory exists
+    if [ ! -d "$SSH_CONFIG_DIR" ]; then
+        debug "SSH config directory does not exist: $SSH_CONFIG_DIR"
+        return 0
+    fi
+    
+    # Find all OCI bastion SSH config files
+    local config_files=$(find "$SSH_CONFIG_DIR" -name "${SSH_CONFIG_PREFIX}_*" -type f 2>/dev/null)
+    
+    if [ -z "$config_files" ]; then
+        debug "No OCI bastion SSH config files found."
+        return 0
+    fi
+    
+    # Create a temporary file for the new SSH config
+    local temp_file=$(mktemp)
+    local ssh_config_modified=false
+    
+    # Process each config file
+    echo "$config_files" | while read -r config_file; do
+        # Get the file modification time in seconds since epoch
+        local file_time=$(stat -c %Y "$config_file" 2>/dev/null || stat -f %m "$config_file" 2>/dev/null)
+        
+        # Calculate the file age in seconds
+        local file_age=$((current_time - file_time))
+        
+        # Get the filename only
+        local filename=$(basename "$config_file")
+        
+        # Check if the file is older than max_age
+        if [ $file_age -gt $max_age ]; then
+            debug "Removing stale SSH config: $config_file (age: $file_age seconds)"
+            
+            # Remove the file
+            rm -f "$config_file"
+            
+            # Remove the Include directive from ~/.ssh/config
+            if [ -f "$HOME/.ssh/config" ]; then
+                # Escape special characters in the filename for grep
+                local grep_pattern=$(echo "$filename" | sed 's/\./\\./g')
+                
+                # Check if the file is included in SSH config
+                if grep -q "$grep_pattern" "$HOME/.ssh/config"; then
+                    # Create a new SSH config file without the Include line
+                    grep -v "$grep_pattern" "$HOME/.ssh/config" > "$temp_file"
+                    cp "$temp_file" "$HOME/.ssh/config"
+                    ssh_config_modified=true
+                    
+                    # Track the file for reporting
+                    removed_files+=("$filename")
+                    ((configs_removed++))
+                fi
+            fi
+        else
+            debug "Keeping SSH config: $config_file (age: $file_age seconds)"
+        fi
+    done
+    
+    # Clean up temporary file
+    rm -f "$temp_file"
+    
+    # Fix permissions if we modified the SSH config
+    if [ "$ssh_config_modified" = true ]; then
+        chmod 600 "$HOME/.ssh/config"
+    fi
+    
+    # Return the number of configs removed and report them
+    if [ $configs_removed -gt 0 ]; then
+        echo ""
+        echo "Cleaned up $configs_removed stale SSH config(s) older than $(($max_age / 3600)) hours:"
+        for file in "${removed_files[@]}"; do
+            echo "  - $file"
+        done
+        echo ""
+    fi
+    
+    return $configs_removed
+}
+
 
 # Function to setup SSH config for a session
 setup_ssh_config() {
@@ -517,266 +597,7 @@ show_ssh_config_options() {
 # CREATE BASTION FUNCTIONS
 #
 
-# Function to show create bastion usage
-show_create_bastion_usage() {
-    echo "Usage: $0 create bastion [options]"
-    echo "Options:"
-    echo "  -c, --compartment-id OCID  Compartment OCID where bastion will be created (required)"
-    echo "  -n, --name NAME            Name for the bastion (required)"
-    echo "  -v, --vcn-id OCID          VCN OCID for validation and information (optional, but recommended)"
-    echo "  -s, --target-subnet-id OCID Subnet OCID where bastion will be created (required)"
-    echo "  --client-cidr CIDR         Client CIDR blocks allowed (default: $CLIENT_CIDR)"
-    echo "  --max-session-ttl SECONDS  Maximum session TTL in seconds (default: $MAX_SESSION_TTL)"
-    echo "  -r, --region REGION        OCI Region (default: configured region)"
-    echo "  -p, --profile PROFILE      OCI Profile to use (default: $OCI_PROFILE)"
-    echo "  --debug                    Enable debug mode to show detailed information"
-    echo "  -h, --help                 Show this help message"
-}
 
-# Function to create a bastion
-create_bastion() {
-    # Process arguments for create bastion command
-    while [[ $# -gt 0 ]]; do
-        key="$1"
-        case $key in
-            -c|--compartment-id)
-                COMPARTMENT_OCID="$2"
-                shift 2
-                ;;
-            -n|--name)
-                BASTION_NAME="$2"
-                shift 2
-                ;;
-            -v|--vcn-id)
-                VCN_ID="$2"
-                shift 2
-                ;;
-            -s|--target-subnet-id)
-                TARGET_SUBNET_OCID="$2"
-                shift 2
-                ;;
-            --client-cidr)
-                CLIENT_CIDR="$2"
-                shift 2
-                ;;
-            --max-session-ttl)
-                MAX_SESSION_TTL="$2"
-                shift 2
-                ;;
-            -r|--region)
-                OCI_REGION="$2"
-                shift 2
-                ;;
-            -p|--profile)
-                OCI_PROFILE="$2"
-                shift 2
-                ;;
-            --debug)
-                DEBUG_MODE=true
-                shift
-                ;;
-            -h|--help)
-                show_create_bastion_usage
-                exit 0
-                ;;
-            *)
-                echo "Unknown option for create bastion command: $1"
-                show_create_bastion_usage
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Check required parameters
-    if [ -z "$COMPARTMENT_OCID" ]; then
-        echo "Error: Compartment ID (-c, --compartment-id) is required."
-        show_create_bastion_usage
-        exit 1
-    fi
-
-    if [ -z "$BASTION_NAME" ]; then
-        echo "Error: Bastion name (-n, --name) is required."
-        show_create_bastion_usage
-        exit 1
-    fi
-
-    if [ -z "$VCN_ID" ]; then
-        echo "Warning: VCN ID (-v, --vcn-id) is not provided."
-        echo "While not required by the OCI CLI, it is recommended for validation."
-        echo "The VCN will be inferred from the subnet."
-        read -p "Continue without VCN validation? (y/n): " confirm_vcn
-        if [[ $confirm_vcn != [yY] && $confirm_vcn != [yY][eE][sS] ]]; then
-            echo "Bastion creation cancelled."
-            exit 0
-        fi
-    fi
-
-    if [ -z "$TARGET_SUBNET_OCID" ]; then
-        echo "Error: Target subnet ID (-s, --target-subnet-id) is required."
-        show_create_bastion_usage
-        exit 1
-    fi
-    
-    # Verify OCI CLI and authentication
-    verify_oci_auth
-    
-    # Check if client CIDR format is correct
-    if [[ ! "$CLIENT_CIDR" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
-        echo "Warning: Client CIDR '$CLIENT_CIDR' might not be in the correct format."
-        echo "Expected format: x.x.x.x/x (e.g., 0.0.0.0/0 or 10.0.0.0/16)"
-        read -p "Continue anyway? (y/n): " confirm_cidr
-        if [[ $confirm_cidr != [yY] && $confirm_cidr != [yY][eE][sS] ]]; then
-            echo "Bastion creation cancelled."
-            exit 0
-        fi
-    fi
-
-    # If multiple CIDR blocks are provided, format them properly for the API
-    if [[ "$CLIENT_CIDR" == *","* ]]; then
-        # Create a proper JSON array with quoted elements
-        IFS=',' read -ra CIDR_BLOCKS <<< "$CLIENT_CIDR"
-        client_cidr_json='['
-        for i in "${!CIDR_BLOCKS[@]}"; do
-            # Add comma if not the first element
-            if [ "$i" -gt 0 ]; then
-                client_cidr_json+=','
-            fi
-            # Trim whitespace and add quotes
-            client_cidr_json+='"'$(echo "${CIDR_BLOCKS[$i]}" | xargs)'"'
-        done
-        client_cidr_json+=']'
-    else
-        # Single CIDR block
-        client_cidr_json='["'"$CLIENT_CIDR"'"]'
-    fi
-    
-    # Validate OCIDs
-    validate_ocid "$COMPARTMENT_OCID" "Compartment"
-    if [ -n "$VCN_ID" ]; then
-        validate_ocid "$VCN_ID" "VCN"
-    fi
-    validate_ocid "$TARGET_SUBNET_OCID" "Target Subnet"
-    
-    # Prepare region parameter
-    region_param=""
-    if [ -n "$OCI_REGION" ]; then
-        region_param="--region $OCI_REGION"
-    fi
-    
-    # Show summary of bastion to be created
-    echo "Creating bastion with the following configuration:"
-    echo "  Name: $BASTION_NAME"
-    echo "  Compartment ID: $COMPARTMENT_OCID"
-    if [ -n "$VCN_ID" ]; then
-        echo "  VCN ID: $VCN_ID (for information only, not used by CLI)"
-    fi
-    echo "  Target Subnet: $TARGET_SUBNET_OCID"
-    echo "  Client CIDR: $(echo "$client_cidr_json" | sed 's/^\[//' | sed 's/\]$//' | sed 's/"//g')"
-    echo "  Max Session TTL: $MAX_SESSION_TTL seconds"
-    echo "  OCI Profile: $OCI_PROFILE"
-    if [ -n "$OCI_REGION" ]; then
-        echo "  Region: $OCI_REGION"
-    else
-        echo "  Region: [default from profile]"
-    fi
-    
-    # Confirm creation
-    read -p "Continue with bastion creation? (y/n): " confirm
-    if [[ $confirm != [yY] && $confirm != [yY][eE][sS] ]]; then
-        echo "Bastion creation cancelled."
-        exit 0
-    fi
-    
-    # Debug command
-    debug "Formatted CIDR JSON: $client_cidr_json"
-    debug_command "oci bastion bastion create --compartment-id \"$COMPARTMENT_OCID\" --bastion-type \"STANDARD\" --target-subnet-id \"$TARGET_SUBNET_OCID\" --client-cidr-list '$client_cidr_json' --max-session-ttl \"$MAX_SESSION_TTL\" --name \"$BASTION_NAME\" --profile \"$OCI_PROFILE\" $region_param"
-    
-    # Create the bastion with parameters
-    echo "Creating bastion..."
-    BASTION_OUTPUT=$(oci bastion bastion create \
-        --compartment-id "$COMPARTMENT_OCID" \
-        --bastion-type "STANDARD" \
-        --target-subnet-id "$TARGET_SUBNET_OCID" \
-        --client-cidr-list "$client_cidr_json" \
-        --max-session-ttl "$MAX_SESSION_TTL" \
-        --name "$BASTION_NAME" \
-        --profile "$OCI_PROFILE" \
-        $region_param 2>&1)
-    
-    # Check for errors
-    EXIT_CODE=$?
-    if [ $EXIT_CODE -ne 0 ]; then
-        echo "Error creating bastion."
-        echo "Error details:"
-        echo "$BASTION_OUTPUT"
-        exit 1
-    fi
-    
-    # Extract and print the bastion OCID
-    BASTION_OCID=$(echo "$BASTION_OUTPUT" | jq -r '.data.id' 2>/dev/null)
-    if [ -z "$BASTION_OCID" ] || [ "$BASTION_OCID" == "null" ]; then
-        echo "Warning: Could not extract bastion OCID from the response."
-        echo "Full response:"
-        echo "$BASTION_OUTPUT"
-        exit 1
-    fi
-    
-    echo "Bastion creation initiated."
-    echo "Bastion OCID: $BASTION_OCID"
-    
-    # Wait for the bastion to become active (optional)
-    echo "Waiting for bastion to become active..."
-    MAX_WAIT_SECONDS=300
-    WAITED_SECONDS=0
-    INTERVAL=10
-    
-    while [ $WAITED_SECONDS -lt $MAX_WAIT_SECONDS ]; do
-        BASTION_INFO=$(oci bastion bastion get \
-            --bastion-id "$BASTION_OCID" \
-            --profile "$OCI_PROFILE" \
-            $region_param 2>&1)
-            
-        if [ $? -ne 0 ]; then
-            echo "Error getting bastion status:"
-            echo "$BASTION_INFO"
-            exit 1
-        fi
-        
-        BASTION_STATE=$(echo "$BASTION_INFO" | jq -r '.data."lifecycle-state"' 2>/dev/null)
-        
-        if [ "$BASTION_STATE" == "ACTIVE" ]; then
-            echo "Bastion is now ACTIVE."
-            break
-        elif [ "$BASTION_STATE" == "FAILED" ]; then
-            echo "Bastion creation failed."
-            echo "Full status:"
-            echo "$BASTION_INFO" | jq '.data'
-            exit 1
-        fi
-        
-        echo "Current state: $BASTION_STATE. Waiting $INTERVAL more seconds..."
-        sleep $INTERVAL
-        WAITED_SECONDS=$((WAITED_SECONDS + INTERVAL))
-    done
-    
-    if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
-        echo "Warning: Timed out waiting for bastion to become active."
-        echo "Please check the bastion status manually."
-    fi
-    
-    # Display final bastion information
-    echo "========================================"
-    echo "Bastion created successfully!"
-    echo "========================================"
-    echo "Name: $BASTION_NAME"
-    echo "OCID: $BASTION_OCID"
-    echo "State: $BASTION_STATE"
-    echo "========================================"
-    echo "Use these commands to manage this bastion:"
-    echo "$0 list session -b $BASTION_OCID"
-    echo "$0 show bastion -b $BASTION_OCID"
-    echo "========================================"
-}
 
 
 #
@@ -808,6 +629,8 @@ show_create_session_usage() {
 
 # Function to create a session
 create_session() {
+    # First, clean up any stale SSH configurations
+    cleanup_old_ssh_configs
     # Process arguments for create session command
     while [[ $# -gt 0 ]]; do
         key="$1"
@@ -1971,7 +1794,6 @@ show_help() {
         case "$help_verb" in
             create)
                 echo "Available create commands:"
-                echo "  $0 create bastion    - Create a new bastion"
                 echo "  $0 create session    - Create a new session on a bastion"
                 echo ""
                 echo "For more details, use: $0 help create <object>"
@@ -2002,9 +1824,6 @@ show_help() {
     help_object="$1"
     
     case "$help_verb $help_object" in
-        "create bastion")
-            show_create_bastion_usage
-            ;;
         "create session")
             show_create_session_usage
             ;;
@@ -2058,15 +1877,12 @@ fi
 case "$VERB" in
     create)
         case "$OBJECT" in
-            bastion)
-                create_bastion "$@"
-                ;;
             session)
                 create_session "$@"
                 ;;
             *)
                 echo "Error: Unknown object '$OBJECT' for verb 'create'"
-                echo "Valid objects: bastion, session"
+                echo "Valid objects: session"
                 exit 1
                 ;;
         esac
