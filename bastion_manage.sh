@@ -3,7 +3,7 @@
 # Copyright (c) 2025. All rights reserved.
 #
 # Name: bastion_manage.sh
-# Version: 1.2.5
+# Version: 1.2.6
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
 # Description: Comprehensive OCI Cloud bastion management script
@@ -21,7 +21,8 @@
 #   and sessions in a single tool with hierarchical commands.
 #
 #   Features include:
-#   - Creating new bastion sessions (SSH and Port Forwarding)
+#   - Creating Managed SSH sessions
+#   - Creating Port Forwarding sessions
 #   - Listing bastions in a compartment
 #   - Listing active sessions for a bastion
 #   - Showing detailed information about bastions and sessions
@@ -45,13 +46,14 @@
 #   help      Show help information
 #
 # OBJECTS:
-#   bastion   OCI bastion service
-#   session   OCI bastion session
+#   bastion        OCI bastion service
+#   session-ssh    OCI managed SSH session
+#   session-forwarding  OCI port forwarding session
 #
 # OPTIONS:
 #   For detailed options for each command, run:
 #   ./bastion_manage.sh help <verb> <object>
-#   Example: ./bastion_manage.sh help create session
+#   Example: ./bastion_manage.sh help create session-ssh
 #
 # COMMON PARAMETERS:
 #   -r, --region REGION        Specify OCI Region (default: configured region)
@@ -59,15 +61,21 @@
 #   --debug                    Enable debug mode for detailed information
 #   -h, --help                 Show help for the specific command
 #
-# CREATE SESSION OPTIONS:
+# CREATE SESSION-SSH OPTIONS:
+#   -b, --bastion-id OCID      Bastion OCID (required)
+#   -n, --name NAME            Session name (required)
+#   --target-id OCID           Target resource OCID (required)
+#   --target-user USER         Target OS username (default: opc)
+#   --ttl SECONDS              Session TTL in seconds (default: 3600)
+#   --key-type TYPE            Key type (PUB or PEM, default: PUB)
+#   --key-file PATH            Public key file (default: ~/.ssh/id_rsa.pub)
+#
+# CREATE SESSION-FORWARDING OPTIONS:
 #   -b, --bastion-id OCID      Bastion OCID (required)
 #   -n, --name NAME            Session name (required)
 #   -t, --target-ip IP         Target private IP address (required)
 #   -p, --port PORT            Target port (default: 22)
-#   --type TYPE                Session type (SSH or PORT_FORWARDING, default: SSH)
 #   --ttl SECONDS              Session TTL in seconds (default: 3600)
-#   --key-type TYPE            Key type (PUB or PEM, default: PUB)
-#   --key-file PATH            Public key file (default: ~/.ssh/id_rsa.pub)
 #
 # SSH CONFIG OPTIONS:
 #   --ssh-config-dir DIR       Directory for SSH config files (default: ~/.ssh/config.d)
@@ -77,15 +85,16 @@
 #
 # EXAMPLES:
 #   # Create a new SSH session: (requires VM OCID, target IP and OS user)
-#   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n my-session -t 10.0.0.25
+#   ./bastion_manage.sh create session-ssh -b ocid1.bastion.oc1..example -n my-session \
+#     --target-id ocid1.instance.oc1..example --target-user opc
 #
 #   # Create a port forwarding session: (requires target IP and port)
-#   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n db-session -t 10.0.0.30 \
-#     -p 1521 --type PORT_FORWARDING --ttl 7200
+#   ./bastion_manage.sh create session-forwarding -b ocid1.bastion.oc1..example -n db-session \
+#     -t 10.0.0.30 -p 1521 --ttl 7200
 #
-#   # Create an SSH session with custom key file: (requires bastion OCID, target IP, OS user, key file and name session)
-#   ./bastion_manage.sh create session -b ocid1.bastion.oc1..example -n secure-session \
-#     -t 10.0.0.25 --key-file ~/.ssh/custom_key.pub
+#   # Create an SSH session with custom key file: (requires bastion OCID, target OCID, OS user, key file and session name)
+#   ./bastion_manage.sh create session-ssh -b ocid1.bastion.oc1..example -n secure-session \
+#     --target-id ocid1.instance.oc1..example --target-user opc --key-file ~/.ssh/custom_key.pub
 #
 #   # List all bastions in a compartment:
 #   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example
@@ -106,8 +115,8 @@
 #   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -i ocid1.bastionsession.oc1.region.xxxx
 #
 #   # Get help for a specific command:
-#   ./bastion_manage.sh help create session
-#   ./bastion_manage.sh help list session
+#   ./bastion_manage.sh help create session-ssh
+#   ./bastion_manage.sh help create session-forwarding
 #
 
 
@@ -604,34 +613,12 @@ show_ssh_config_options() {
 # CREATE SESSION FUNCTIONS
 #
 
-# Function to show create session usage
-show_create_session_usage() {
-    echo "Usage: $0 create session [options]"
-    echo "Options:"
-    echo "  -b, --bastion-id OCID      Bastion OCID (required)"
-    echo "  -n, --name NAME            Session display name (required)"
-    echo "  -t, --target-ip IP         Target private IP address (required for PORT_FORWARDING)"
-    echo "  -p, --port PORT            Target port (default: $TARGET_PORT)"
-    echo "  --type TYPE                Session type (SSH or PORT_FORWARDING, default: $SESSION_TYPE)"
-    echo "  --ttl SECONDS              Session time-to-live in seconds (minimum: 1800, default: $SESSION_TTL)"
-    echo "  --key-type TYPE            Key type (PUB or PEM, default: $KEY_TYPE)"
-    echo "  --key-file PATH            Public key file (default: $PUBLIC_KEY_FILE)"
-    echo "  --target-id OCID           Target compute instance OCID (required for SSH sessions)"
-    echo "  --target-user USER         Target OS username (default: $TARGET_OS_USER, required for SSH sessions)"
-    echo "  -r, --region REGION        OCI Region (default: configured region)"
-    echo "  --profile PROFILE          OCI Profile to use (default: $OCI_PROFILE)"
-    echo "  --debug                    Enable debug mode to show detailed information"
-    echo "  -h, --help                 Show this help message"
-    echo ""
-    show_ssh_config_options
-}
 
-
-# Function to create a session
-create_session() {
+# Function to create an SSH session
+create_session_ssh() {
     # First, clean up any stale SSH configurations
     cleanup_old_ssh_configs
-    # Process arguments for create session command
+    # Process arguments for create SSH session command
     while [[ $# -gt 0 ]]; do
         key="$1"
         case $key in
@@ -643,16 +630,12 @@ create_session() {
                 SESSION_NAME="$2"
                 shift 2
                 ;;
-            -t|--target-ip)
-                TARGET_IP="$2"
+            --target-id)
+                TARGET_RESOURCE_OCID="$2"
                 shift 2
                 ;;
-            -p|--port)
-                TARGET_PORT="$2"
-                shift 2
-                ;;
-            --type)
-                SESSION_TYPE="$2"
+            --target-user)
+                TARGET_OS_USER="$2"
                 shift 2
                 ;;
             --ttl)
@@ -665,14 +648,6 @@ create_session() {
                 ;;
             --key-file)
                 PUBLIC_KEY_FILE="$2"
-                shift 2
-                ;;
-            --target-id)
-                TARGET_RESOURCE_OCID="$2"
-                shift 2
-                ;;
-            --target-user)
-                TARGET_OS_USER="$2"
                 shift 2
                 ;;
             -r|--region)
@@ -702,7 +677,7 @@ create_session() {
             --ssh-config-enabled)
                 SSH_CONFIG_ENABLED=true
                 shift
-;;
+                ;;
             --ssh-config-disabled)
                 SSH_CONFIG_ENABLED=false
                 shift
@@ -712,12 +687,12 @@ create_session() {
                 shift
                 ;;
             -h|--help)
-                show_create_session_usage
+                show_create_session_ssh_usage
                 exit 0
                 ;;
             *)
-                echo "Unknown option for create session command: $1"
-                show_create_session_usage
+                echo "Unknown option for create SSH session command: $1"
+                show_create_session_ssh_usage
                 exit 1
                 ;;
         esac
@@ -726,55 +701,28 @@ create_session() {
     # Check required parameters
     if [ -z "$BASTION_OCID" ]; then
         echo "Error: Bastion OCID (-b, --bastion-id) is required."
-        show_create_session_usage
+        show_create_session_ssh_usage
         exit 1
     fi
     
     if [ -z "$SESSION_NAME" ]; then
         echo "Error: Session name (-n, --name) is required."
-        show_create_session_usage
-        exit 1
-    fi
-    
-    # Validate session type
-    if [[ ! "$SESSION_TYPE" =~ ^(SSH|PORT_FORWARDING)$ ]]; then
-        echo "Error: Invalid session type '$SESSION_TYPE'. Must be SSH or PORT_FORWARDING."
-        show_create_session_usage
+        show_create_session_ssh_usage
         exit 1
     fi
     
     # Check SSH-specific parameters
-    if [ "$SESSION_TYPE" = "SSH" ]; then
-        if [ -z "$TARGET_RESOURCE_OCID" ]; then
-            echo "Error: Target resource OCID (--target-id) is required for SSH sessions."
-            show_create_session_usage
-            exit 1
-        fi
-        validate_ocid "$TARGET_RESOURCE_OCID" "Target Resource"
-    else
-        # PORT_FORWARDING requires target IP
-        if [ -z "$TARGET_IP" ]; then
-            echo "Error: Target IP (-t, --target-ip) is required for PORT_FORWARDING sessions."
-            show_create_session_usage
-            exit 1
-        fi
-        
-        # Validate target IP
-        if [[ ! "$TARGET_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Warning: Target IP '$TARGET_IP' might not be in the correct format."
-            echo "Expected format: x.x.x.x (e.g., 10.0.0.25)"
-            read -p "Continue anyway? (y/n): " confirm_ip
-            if [[ $confirm_ip != [yY] && $confirm_ip != [yY][eE][sS] ]]; then
-                echo "Session creation cancelled."
-                exit 0
-            fi
-        fi
+    if [ -z "$TARGET_RESOURCE_OCID" ]; then
+        echo "Error: Target resource OCID (--target-id) is required for SSH sessions."
+        show_create_session_ssh_usage
+        exit 1
     fi
+    validate_ocid "$TARGET_RESOURCE_OCID" "Target Resource"
     
     # Validate key type if provided
     if [[ ! "$KEY_TYPE" =~ ^(PUB|PEM)$ ]]; then
         echo "Error: Invalid key type '$KEY_TYPE'. Must be PUB or PEM."
-        show_create_session_usage
+        show_create_session_ssh_usage
         exit 1
     fi
     
@@ -786,27 +734,25 @@ create_session() {
     fi
     
     # Validate public key file exists for SSH sessions
-    if [ "$SESSION_TYPE" = "SSH" ]; then
-        # Expand the tilde in the path
-        expanded_key_file="${PUBLIC_KEY_FILE/#\~/$HOME}"
-        
-        if [ ! -f "$expanded_key_file" ]; then
-            echo "Error: Public key file '$PUBLIC_KEY_FILE' not found."
-            echo "Please provide a valid public key file path."
-            exit 1
-        fi
-        
-        # Read the key file
-        public_key=$(cat "$expanded_key_file")
-        
-        # Basic validation of the key format
-        if [[ "$KEY_TYPE" = "PUB" && ! "$public_key" =~ ^ssh-[a-z]+ ]]; then
-            echo "Warning: The public key file doesn't appear to be in OpenSSH format."
-            read -p "Continue anyway? (y/n): " confirm_key
-            if [[ $confirm_key != [yY] && $confirm_key != [yY][eE][sS] ]]; then
-                echo "Session creation cancelled."
-                exit 0
-            fi
+    # Expand the tilde in the path
+    expanded_key_file="${PUBLIC_KEY_FILE/#\~/$HOME}"
+    
+    if [ ! -f "$expanded_key_file" ]; then
+        echo "Error: Public key file '$PUBLIC_KEY_FILE' not found."
+        echo "Please provide a valid public key file path."
+        exit 1
+    fi
+    
+    # Read the key file
+    public_key=$(cat "$expanded_key_file")
+    
+    # Basic validation of the key format
+    if [[ "$KEY_TYPE" = "PUB" && ! "$public_key" =~ ^ssh-[a-z]+ ]]; then
+        echo "Warning: The public key file doesn't appear to be in OpenSSH format."
+        read -p "Continue anyway? (y/n): " confirm_key
+        if [[ $confirm_key != [yY] && $confirm_key != [yY][eE][sS] ]]; then
+            echo "Session creation cancelled."
+            exit 0
         fi
     fi
     
@@ -854,22 +800,15 @@ create_session() {
     fi
 
     # Show summary of session to be created
-    echo "Creating session with the following configuration:"
+    echo "Creating SSH session with the following configuration:"
     echo "  Name: $SESSION_NAME"
     echo "  Bastion OCID: $BASTION_OCID"
-    echo "  Session Type: $SESSION_TYPE"
+    echo "  Session Type: SSH"
     echo "  Session TTL: $SESSION_TTL seconds"
-    
-    if [ "$SESSION_TYPE" = "SSH" ]; then
-        echo "  Target Resource OCID: $TARGET_RESOURCE_OCID"
-        echo "  Target OS Username: $TARGET_OS_USER"
-        echo "  Key Type: $KEY_TYPE"
-        echo "  Public Key File: $PUBLIC_KEY_FILE"
-    else
-        echo "  Target IP: $TARGET_IP"
-        echo "  Target Port: $TARGET_PORT"
-    fi
-    
+    echo "  Target Resource OCID: $TARGET_RESOURCE_OCID"
+    echo "  Target OS Username: $TARGET_OS_USER"
+    echo "  Key Type: $KEY_TYPE"
+    echo "  Public Key File: $PUBLIC_KEY_FILE"
     echo "  OCI Profile: $OCI_PROFILE"
     if [ -n "$OCI_REGION" ]; then
         echo "  Region: $OCI_REGION"
@@ -884,53 +823,31 @@ create_session() {
         exit 0
     fi
     
-    # Create the session based on type
-    if [ "$SESSION_TYPE" = "SSH" ]; then
-        # Create SSH session
-        echo "Creating SSH session..."
-        
-        # Build the command with corrected parameters
-        create_cmd="oci bastion session create-managed-ssh \
-            --bastion-id \"$BASTION_OCID\" \
-            --display-name \"$SESSION_NAME\" \
-            --session-ttl $SESSION_TTL \
-            --target-resource-id \"$TARGET_RESOURCE_OCID\" \
-            --target-os-username \"$TARGET_OS_USER\" \
-            --profile \"$OCI_PROFILE\" \
-            $region_param"
-        
-        # Add public key
-        if [ "$KEY_TYPE" = "PUB" ]; then
-            create_cmd="$create_cmd --ssh-public-key-file \"$expanded_key_file\""
-        else
-            create_cmd="$create_cmd --ssh-public-key-content \"$public_key\""
-        fi
-        
-        # Debug the command
-        debug_command "$create_cmd"
-        
-        # Create the session
-        SESSION_OUTPUT=$(eval "$create_cmd" 2>&1)
-        
+    # Create SSH session
+    echo "Creating SSH session..."
+    
+    # Build the command with corrected parameters
+    create_cmd="oci bastion session create-managed-ssh \
+        --bastion-id \"$BASTION_OCID\" \
+        --display-name \"$SESSION_NAME\" \
+        --session-ttl $SESSION_TTL \
+        --target-resource-id \"$TARGET_RESOURCE_OCID\" \
+        --target-os-username \"$TARGET_OS_USER\" \
+        --profile \"$OCI_PROFILE\" \
+        $region_param"
+    
+    # Add public key
+    if [ "$KEY_TYPE" = "PUB" ]; then
+        create_cmd="$create_cmd --ssh-public-key-file \"$expanded_key_file\""
     else
-        # Create Port Forwarding session
-        echo "Creating Port Forwarding session..."
-        
-        create_cmd="oci bastion session create-port-forwarding \
-            --bastion-id \"$BASTION_OCID\" \
-            --display-name \"$SESSION_NAME\" \
-            --session-ttl $SESSION_TTL \
-            --target-private-ip \"$TARGET_IP\" \
-            --target-port $TARGET_PORT \
-            --profile \"$OCI_PROFILE\" \
-            $region_param"
-            
-        # Debug the command
-        debug_command "$create_cmd"
-        
-        # Create the session
-        SESSION_OUTPUT=$(eval "$create_cmd" 2>&1)
+        create_cmd="$create_cmd --ssh-public-key-content \"$public_key\""
     fi
+    
+    # Debug the command
+    debug_command "$create_cmd"
+    
+    # Create the session
+    SESSION_OUTPUT=$(eval "$create_cmd" 2>&1)
     
     # Check for errors
     EXIT_CODE=$?
@@ -989,11 +906,11 @@ create_session() {
     done
     
     SESSION_ACTIVATED=false
-      if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
+    if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
         echo "Warning: Timed out waiting for session to become active."
         echo "The session was created but has not reached ACTIVE state yet."
         echo ""
-        # Intentar obtener el estado actual
+        # Try to get the current state
         SESSION_INFO=$(oci bastion session get \
             --session-id "$SESSION_OCID" \
             --profile "$OCI_PROFILE" \
@@ -1026,55 +943,369 @@ create_session() {
         echo ""
     fi
 
-    # Show connection information based on session type
-    if [ "$SESSION_TYPE" = "SSH" ]; then
-        SSH_COMMAND=$(echo "$SESSION_INFO" | jq -r '.data["ssh-metadata"]["command"] // "N/A"')
-        if [ "$SSH_COMMAND" != "N/A" ] && [ "$SSH_COMMAND" != "null" ]; then
-            echo "SSH Command:"
-            echo "$SSH_COMMAND"
+    # Show SSH connection information if active
+    SSH_COMMAND=$(echo "$SESSION_INFO" | jq -r '.data["ssh-metadata"]["command"] // "N/A"')
+    if [ "$SSH_COMMAND" != "N/A" ] && [ "$SSH_COMMAND" != "null" ]; then
+        echo "SSH Command:"
+        echo "$SSH_COMMAND"
+        
+        # Setup SSH config if enabled
+        if [ "$SSH_CONFIG_ENABLED" = "true" ]; then
+            # Extract session ID from the SSH command or metadata
+            local extracted_session_id=$(echo "$SESSION_INFO" | jq -r '.data.id // ""')
             
-            # Setup SSH config if enabled
-            if [ "$SSH_CONFIG_ENABLED" = "true" ]; then
-                # Extract session ID from the SSH command or metadata
-                local extracted_session_id=$(echo "$SESSION_INFO" | jq -r '.data.id // ""')
-                
+            echo ""
+            echo "Setting up SSH config..."
+            setup_ssh_config "$SESSION_NAME" "$extracted_session_id" "$SSH_COMMAND" "$TARGET_IP" "$TARGET_PORT" "$TARGET_OS_USER"
+            
+            # Get the short ID for user reference
+            local short_id="${extracted_session_id: -8}"
+            if [ -n "$short_id" ]; then
                 echo ""
-                echo "Setting up SSH config..."
-                setup_ssh_config "$SESSION_NAME" "$extracted_session_id" "$SSH_COMMAND" "$TARGET_IP" "$TARGET_PORT" "$TARGET_OS_USER"
-                
-                # Get the short ID for user reference
-                local short_id="${extracted_session_id: -8}"
-                if [ -n "$short_id" ]; then
-                    echo ""
-                    echo "================ SSH CONFIG CREATED ================"
-                    echo "You can now connect directly using: ssh target-$short_id"
-                    echo "====================================================="
-                fi
+                echo "================ SSH CONFIG CREATED ================"
+                echo "You can now connect directly using: ssh target-$short_id"
+                echo "====================================================="
             fi
-        else
-            echo "Connection information is not available yet."
-            echo "Please run the following command to get connection details:"
-            echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
         fi
     else
-        echo "Port Forwarding Session created."
-        
-        # For Port Forwarding, we should extract additional connection details if available
-        local local_port=$(echo "$SESSION_INFO" | jq -r '.data["port-forwarding-metadata"]["local-port"] // "N/A"')
-        if [ "$local_port" != "N/A" ] && [ "$local_port" != "null" ]; then
-            echo ""
-            echo "============ PORT FORWARDING DETAILS ============"
-            echo "Local Port: $local_port"
-            echo "Target: $TARGET_IP:$TARGET_PORT"
-            echo "To connect, use: localhost:$local_port"
-            echo "================================================="
-        else
-            echo "Please run the following command to get connection details:"
-            echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
-        fi
+        echo "Connection information is not available yet."
+        echo "Please run the following command to get connection details:"
+        echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
     fi
     
     echo "========================================"
+}
+
+# Function to show create SSH session usage
+show_create_session_ssh_usage() {
+    echo "Usage: $0 create session-ssh [options]"
+    echo "Options:"
+    echo "  -b, --bastion-id OCID      Bastion OCID (required)"
+    echo "  -n, --name NAME            Session display name (required)"
+    echo "  --target-id OCID           Target compute instance OCID (required for SSH sessions)"
+    echo "  --target-user USER         Target OS username (default: $TARGET_OS_USER)"
+    echo "  --ttl SECONDS              Session time-to-live in seconds (minimum: 1800, default: $SESSION_TTL)"
+    echo "  --key-type TYPE            Key type (PUB or PEM, default: $KEY_TYPE)"
+    echo "  --key-file PATH            Public key file (default: $PUBLIC_KEY_FILE)"
+    echo "  -r, --region REGION        OCI Region (default: configured region)"
+    echo "  --profile PROFILE          OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  --debug                    Enable debug mode to show detailed information"
+    echo "  -h, --help                 Show this help message"
+    echo ""
+    show_ssh_config_options
+}
+
+
+# Function to create an SSH Port Forwarding session
+create_session_forwarding() {
+    # First, clean up any stale SSH configurations
+    cleanup_old_ssh_configs
+    # Process arguments for create port forwarding session command
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            -b|--bastion-id)
+                BASTION_OCID="$2"
+                shift 2
+                ;;
+            -n|--name)
+                SESSION_NAME="$2"
+                shift 2
+                ;;
+            -t|--target-ip)
+                TARGET_IP="$2"
+                shift 2
+                ;;
+            -p|--port)
+                TARGET_PORT="$2"
+                shift 2
+                ;;
+            --ttl)
+                SESSION_TTL="$2"
+                shift 2
+                ;;
+            -r|--region)
+                OCI_REGION="$2"
+                shift 2
+                ;;
+            --profile)
+                OCI_PROFILE="$2"
+                shift 2
+                ;;
+            --ssh-config-dir)
+                SSH_CONFIG_DIR="$2"
+                shift 2
+                ;;
+            --ssh-config-domain)
+                SSH_CONFIG_DOMAIN="$2"
+                shift 2
+                ;;
+            --ssh-config-prefix)
+                SSH_CONFIG_PREFIX="$2"
+                shift 2
+                ;;
+            --debug)
+                DEBUG_MODE=true
+                shift
+                ;;
+            -h|--help)
+                show_create_session_forwarding_usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for create port forwarding session command: $1"
+                show_create_session_forwarding_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check required parameters
+    if [ -z "$BASTION_OCID" ]; then
+        echo "Error: Bastion OCID (-b, --bastion-id) is required."
+        show_create_session_forwarding_usage
+        exit 1
+    fi
+    
+    if [ -z "$SESSION_NAME" ]; then
+        echo "Error: Session name (-n, --name) is required."
+        show_create_session_forwarding_usage
+        exit 1
+    fi
+
+    # PORT_FORWARDING requires target IP
+    if [ -z "$TARGET_IP" ]; then
+        echo "Error: Target IP (-t, --target-ip) is required for PORT_FORWARDING sessions."
+        show_create_session_forwarding_usage
+        exit 1
+    fi
+    
+    # Validate target IP
+    if [[ ! "$TARGET_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Warning: Target IP '$TARGET_IP' might not be in the correct format."
+        echo "Expected format: x.x.x.x (e.g., 10.0.0.25)"
+        read -p "Continue anyway? (y/n): " confirm_ip
+        if [[ $confirm_ip != [yY] && $confirm_ip != [yY][eE][sS] ]]; then
+            echo "Session creation cancelled."
+            exit 0
+        fi
+    fi
+    
+    # Verify session TTL is at least 1800 seconds (30 minutes)
+    if [ "$SESSION_TTL" -lt 1800 ]; then
+        echo "Warning: Requested TTL ($SESSION_TTL seconds) is less than the minimum required (1800 seconds)."
+        echo "Setting TTL to the minimum allowed: 1800 seconds."
+        SESSION_TTL=1800
+    fi
+
+    # Validate bastion OCID
+    validate_ocid "$BASTION_OCID" "Bastion"
+    
+    # Verify OCI CLI and authentication
+    verify_oci_auth
+    
+    # Prepare region parameter
+    region_param=""
+    if [ -n "$OCI_REGION" ]; then
+        region_param="--region $OCI_REGION"
+    fi
+    
+    # Verify the bastion exists and is active
+    echo "Verifying bastion status..."
+    BASTION_INFO=$(oci bastion bastion get \
+        --bastion-id "$BASTION_OCID" \
+        --profile "$OCI_PROFILE" \
+        $region_param 2>&1)
+        
+    if [ $? -ne 0 ]; then
+        echo "Error getting bastion status:"
+        echo "$BASTION_INFO"
+        exit 1
+    fi
+    
+    BASTION_STATE=$(echo "$BASTION_INFO" | jq -r '.data."lifecycle-state"' 2>/dev/null)
+    
+    if [ "$BASTION_STATE" != "ACTIVE" ]; then
+        echo "Error: Bastion is not in ACTIVE state. Current state: $BASTION_STATE"
+        echo "The bastion must be in ACTIVE state to create a session."
+        exit 1
+    fi
+    
+    # Get max session TTL from bastion
+    MAX_BASTION_TTL=$(echo "$BASTION_INFO" | jq -r '.data."max-session-ttl-in-seconds"' 2>/dev/null)
+    
+    # Check if requested TTL exceeds the bastion's maximum
+    if [ "$SESSION_TTL" -gt "$MAX_BASTION_TTL" ]; then
+        echo "Warning: Requested TTL ($SESSION_TTL seconds) exceeds the bastion's maximum TTL ($MAX_BASTION_TTL seconds)."
+        echo "Setting TTL to the maximum allowed: $MAX_BASTION_TTL seconds."
+        SESSION_TTL="$MAX_BASTION_TTL"
+    fi
+
+    # Show summary of session to be created
+    echo "Creating Port Forwarding session with the following configuration:"
+    echo "  Name: $SESSION_NAME"
+    echo "  Bastion OCID: $BASTION_OCID"
+    echo "  Session Type: PORT_FORWARDING"
+    echo "  Session TTL: $SESSION_TTL seconds"
+    echo "  Target IP: $TARGET_IP"
+    echo "  Target Port: $TARGET_PORT"
+    echo "  OCI Profile: $OCI_PROFILE"
+    if [ -n "$OCI_REGION" ]; then
+        echo "  Region: $OCI_REGION"
+    else
+        echo "  Region: [default from profile]"
+    fi
+    
+    # Confirm creation
+    read -p "Continue with session creation? (y/n): " confirm
+    if [[ $confirm != [yY] && $confirm != [yY][eE][sS] ]]; then
+        echo "Session creation cancelled."
+        exit 0
+    fi
+    
+    # Create Port Forwarding session
+    echo "Creating Port Forwarding session..."
+    
+    create_cmd="oci bastion session create-port-forwarding \
+        --bastion-id \"$BASTION_OCID\" \
+        --display-name \"$SESSION_NAME\" \
+        --session-ttl $SESSION_TTL \
+        --target-private-ip \"$TARGET_IP\" \
+        --target-port $TARGET_PORT \
+        --profile \"$OCI_PROFILE\" \
+        $region_param"
+        
+    # Debug the command
+    debug_command "$create_cmd"
+    
+    # Create the session
+    SESSION_OUTPUT=$(eval "$create_cmd" 2>&1)
+    
+    # Check for errors
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo "Error creating session."
+        echo "Error details:"
+        echo "$SESSION_OUTPUT"
+        exit 1
+    fi
+    
+    # Extract and print the session OCID
+    SESSION_OCID=$(echo "$SESSION_OUTPUT" | jq -r '.data.id' 2>/dev/null)
+    if [ -z "$SESSION_OCID" ] || [ "$SESSION_OCID" == "null" ]; then
+        echo "Warning: Could not extract session OCID from the response."
+        echo "Full response:"
+        echo "$SESSION_OUTPUT"
+        exit 1
+    fi
+    
+    echo "Session creation initiated."
+    echo "Session OCID: $SESSION_OCID"
+    
+    # Wait for the session to become active
+    echo "Waiting for session to become active..."
+    MAX_WAIT_SECONDS=180
+    WAITED_SECONDS=0
+    INTERVAL=10
+    
+    while [ $WAITED_SECONDS -lt $MAX_WAIT_SECONDS ]; do
+        SESSION_INFO=$(oci bastion session get \
+            --session-id "$SESSION_OCID" \
+            --profile "$OCI_PROFILE" \
+            $region_param 2>&1)
+            
+        if [ $? -ne 0 ]; then
+            echo "Error getting session status:"
+            echo "$SESSION_INFO"
+            exit 1
+        fi
+        
+        SESSION_STATE=$(echo "$SESSION_INFO" | jq -r '.data."lifecycle-state"' 2>/dev/null)
+        
+        if [ "$SESSION_STATE" == "ACTIVE" ]; then
+            echo "Session is now ACTIVE."
+            break
+        elif [ "$SESSION_STATE" == "FAILED" ]; then
+            echo "Session creation failed."
+            echo "Full status:"
+            echo "$SESSION_INFO" | jq '.data'
+            exit 1
+        fi
+        
+        echo "Current state: $SESSION_STATE. Waiting $INTERVAL more seconds..."
+        sleep $INTERVAL
+        WAITED_SECONDS=$((WAITED_SECONDS + INTERVAL))
+    done
+    
+    SESSION_ACTIVATED=false
+    if [ $WAITED_SECONDS -ge $MAX_WAIT_SECONDS ]; then
+        echo "Warning: Timed out waiting for session to become active."
+        echo "The session was created but has not reached ACTIVE state yet."
+        echo ""
+        # Try to get the current state
+        SESSION_INFO=$(oci bastion session get \
+            --session-id "$SESSION_OCID" \
+            --profile "$OCI_PROFILE" \
+            $region_param 2>/dev/null)
+            
+        if [ $? -eq 0 ]; then
+            SESSION_STATE=$(echo "$SESSION_INFO" | jq -r '.data."lifecycle-state"' 2>/dev/null)
+            echo "Current state: $SESSION_STATE"
+        else
+            echo "Could not retrieve current session state."
+        fi
+    else
+        SESSION_ACTIVATED=true
+    fi
+
+    # Display session information and connection details
+    echo ""
+    echo "========================================"
+    echo "Session created successfully!"
+    echo "========================================"
+    echo "Name: $SESSION_NAME"
+    echo "OCID: $SESSION_OCID"
+    echo "State: $SESSION_STATE"
+    echo "TTL: $SESSION_TTL seconds (expires in ~$(($SESSION_TTL / 60)) minutes)"
+    echo "========================================"
+
+    if [ "$SESSION_ACTIVATED" = false ]; then
+        echo "To check session status later, use:"
+        echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
+        echo ""
+    fi
+
+    # For Port Forwarding, we should extract additional connection details if available
+    local_port=$(echo "$SESSION_INFO" | jq -r '.data["port-forwarding-metadata"]["local-port"] // "N/A"')
+    if [ "$local_port" != "N/A" ] && [ "$local_port" != "null" ]; then
+        echo ""
+        echo "============ PORT FORWARDING DETAILS ============"
+        echo "Local Port: $local_port"
+        echo "Target: $TARGET_IP:$TARGET_PORT"
+        echo "To connect, use: localhost:$local_port"
+        echo "================================================="
+    else
+        echo "Port forwarding connection information is not available yet."
+        echo "Please run the following command to get connection details:"
+        echo "$0 show session -b $BASTION_OCID -s \"$SESSION_NAME\""
+    fi
+    
+    echo "========================================"
+}
+
+# Function to show create port forwarding session usage
+show_create_session_forwarding_usage() {
+    echo "Usage: $0 create session-forwarding [options]"
+    echo "Options:"
+    echo "  -b, --bastion-id OCID      Bastion OCID (required)"
+    echo "  -n, --name NAME            Session display name (required)"
+    echo "  -t, --target-ip IP         Target private IP address (required)"
+    echo "  -p, --port PORT            Target port (default: $TARGET_PORT)"
+    echo "  --ttl SECONDS              Session time-to-live in seconds (minimum: 1800, default: $SESSION_TTL)"
+    echo "  -r, --region REGION        OCI Region (default: configured region)"
+    echo "  --profile PROFILE          OCI Profile to use (default: $OCI_PROFILE)"
+    echo "  --debug                    Enable debug mode to show detailed information"
+    echo "  -h, --help                 Show this help message"
 }
 
 
@@ -1787,7 +2018,7 @@ show_help() {
         exit 0
     fi
     
-    help_verb="$1"
+    help_verb="$
     shift
     
     if [ $# -eq 0 ]; then
@@ -1877,12 +2108,15 @@ fi
 case "$VERB" in
     create)
         case "$OBJECT" in
-            session)
-                create_session "$@"
+            session-ssh)
+                create_session_ssh "$@"
+                ;;
+            session-forwarding)
+                create_session_forwarding "$@"
                 ;;
             *)
                 echo "Error: Unknown object '$OBJECT' for verb 'create'"
-                echo "Valid objects: session"
+                echo "Valid objects: session-ssh, session-forwarding"
                 exit 1
                 ;;
         esac
