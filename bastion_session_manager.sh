@@ -2,27 +2,27 @@
 #
 # Copyright (c) 2025. All rights reserved.
 #
-# Name: bastion_manage.sh
+# Name: bastion_session_manager.sh
 # Version: 1.0.0
 # Author: Mstaaravin
 # Contributors: Developed with assistance from Claude AI
-# Description: Comprehensive OCI Cloud bastion management script
-#              Lists and manages OCI bastions and sessions
+# Description: Managed SSH Session creator for OCI Cloud bastion
+#              Creates managed SSH sessions for OCI bastions
 #              Compatible with OCI CLI
-#              Now with SSH config integration for easy access
+#              Includes SSH config integration for easy access
 #
 # =================================================================
-# OCI Bastion Script Management Tool
+# OCI Bastion Managed SSH Session Tool
 # =================================================================
 #
 # DESCRIPTION:
-#   This script provides a unified interface to manage Oracle Cloud Infrastructure (OCI)
-#   bastion services. It combines listing and management of bastions
-#   and sessions in a single tool with hierarchical commands.
+#   This script provides a specialized interface to create Managed SSH sessions
+#   for Oracle Cloud Infrastructure (OCI) bastion services. It allows you to
+#   easily create SSH sessions, list bastions and sessions, and provides
+#   SSH config integration for simple access.
 #
 #   Features include:
 #   - Creating Managed SSH sessions
-#   - Creating Port Forwarding sessions
 #   - Listing bastions in a compartment
 #   - Listing active sessions for a bastion
 #   - Showing detailed information about bastions and sessions
@@ -37,23 +37,22 @@
 #   https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/bastion/bastion/create.html
 #
 # USAGE:
-#   ./bastion_manage.sh <verb> <object> [options]
+#   ./bastion_session_manager.sh <verb> <object> [options]
 #
 # VERBS:
-#   create    Create a new session
+#   create    Create a new managed SSH session
 #   list      List resources (bastions or sessions)
 #   show      Show detailed information about a resource
 #   help      Show help information
 #
 # OBJECTS:
-#   bastion        OCI bastion service
-#   session-ssh    OCI managed SSH session
-#   session-forwarding  OCI port forwarding session
+#   bastion   OCI bastion service
+#   session   OCI bastion managed SSH session
 #
 # OPTIONS:
 #   For detailed options for each command, run:
-#   ./bastion_manage.sh help <verb> <object>
-#   Example: ./bastion_manage.sh help create session-ssh
+#   ./bastion_session_manager.sh help <verb> <object>
+#   Example: ./bastion_session_manager.sh help create session
 #
 # COMMON PARAMETERS:
 #   -r, --region REGION        Specify OCI Region (default: configured region)
@@ -61,7 +60,7 @@
 #   --debug                    Enable debug mode for detailed information
 #   -h, --help                 Show help for the specific command
 #
-# CREATE SESSION-SSH OPTIONS:
+# CREATE SESSION OPTIONS:
 #   -b, --bastion-id OCID      Bastion OCID (required)
 #   -n, --name NAME            Session name (required)
 #   --target-id OCID           Target resource OCID (required)
@@ -69,13 +68,6 @@
 #   --ttl SECONDS              Session TTL in seconds (default: 3600)
 #   --key-type TYPE            Key type (PUB or PEM, default: PUB)
 #   --key-file PATH            Public key file (default: ~/.ssh/id_rsa.pub)
-#
-# CREATE SESSION-FORWARDING OPTIONS:
-#   -b, --bastion-id OCID      Bastion OCID (required)
-#   -n, --name NAME            Session name (required)
-#   -t, --target-ip IP         Target private IP address (required)
-#   -p, --port PORT            Target port (default: 22)
-#   --ttl SECONDS              Session TTL in seconds (default: 3600)
 #
 # SSH CONFIG OPTIONS:
 #   --ssh-config-dir DIR       Directory for SSH config files (default: ~/.ssh/config.d)
@@ -85,39 +77,33 @@
 #
 # EXAMPLES:
 #   # Create a new SSH session: (requires VM OCID, target IP and OS user)
-#   ./bastion_manage.sh create session-ssh -b ocid1.bastion.oc1..example -n my-session \
+#   ./bastion_session_manager.sh create session-ssh -b ocid1.bastion.oc1..example -n my-session \
 #     --target-id ocid1.instance.oc1..example --target-user opc
 #
-#   # Create a port forwarding session: (requires target IP and port)
-#   ./bastion_manage.sh create session-forwarding -b ocid1.bastion.oc1..example -n db-session \
-#     -t 10.0.0.30 -p 1521 --ttl 7200
-#
 #   # Create an SSH session with custom key file: (requires bastion OCID, target OCID, OS user, key file and session name)
-#   ./bastion_manage.sh create session-ssh -b ocid1.bastion.oc1..example -n secure-session \
+#   ./bastion_session_manager.sh create session-ssh -b ocid1.bastion.oc1..example -n secure-session \
 #     --target-id ocid1.instance.oc1..example --target-user opc --key-file ~/.ssh/custom_key.pub
 #
 #   # List all bastions in a compartment:
-#   ./bastion_manage.sh list bastion -c ocid1.compartment.oc1..example
+#   ./bastion_session_manager.sh list bastion -c ocid1.compartment.oc1..example
 #
 #   # List all bastions across all accessible compartments:
-#   ./bastion_manage.sh list bastion --all
+#   ./bastion_session_manager.sh list bastion --all
 #
 #   # List all sessions for a bastion: (you need to know previously created bastion OCID)
-#   ./bastion_manage.sh list session -b ocid1.bastion.oc1.region.xxxx
+#   ./bastion_session_manager.sh list session -b ocid1.bastion.oc1.region.xxxx
 #
 #   # Show detailed information for a bastion:
-#   ./bastion_manage.sh show bastion -b ocid1.bastion.oc1.region.xxxx
+#   ./bastion_session_manager.sh show bastion -b ocid1.bastion.oc1.region.xxxx
 #
 #   # Show detailed information for a session by name:
-#   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -s "my-session-name"
+#   ./bastion_session_manager.sh show session -b ocid1.bastion.oc1.region.xxxx -s "my-session-name"
 #
 #   # Show detailed information for a session by ID:
-#   ./bastion_manage.sh show session -b ocid1.bastion.oc1.region.xxxx -i ocid1.bastionsession.oc1.region.xxxx
+#   ./bastion_session_manager.sh show session -b ocid1.bastion.oc1.region.xxxx -i ocid1.bastionsession.oc1.region.xxxx
 #
 #   # Get help for a specific command:
-#   ./bastion_manage.sh help create session-ssh
-#   ./bastion_manage.sh help create session-forwarding
-#
+#   ./bastion_session_manager.sh help create session-ssh
 
 
 # Global variables as specified
@@ -2108,15 +2094,12 @@ fi
 case "$VERB" in
     create)
         case "$OBJECT" in
-            session-ssh)
+            session-ssh)  # <-- Cambiar aquí
                 create_session_ssh "$@"
-                ;;
-            session-forwarding)
-                create_session_forwarding "$@"
                 ;;
             *)
                 echo "Error: Unknown object '$OBJECT' for verb 'create'"
-                echo "Valid objects: session-ssh, session-forwarding"
+                echo "Valid objects: session-ssh"  # <-- Y aquí
                 exit 1
                 ;;
         esac
