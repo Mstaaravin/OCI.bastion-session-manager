@@ -25,7 +25,7 @@ The script streamlines the process of establishing secure SSH connections to pri
 - Manages SSH identity files and connection parameters
 - Provides seamless SSH experience without complex command memorization
 
-> **🐳 Environment Integration:** This script is designed to run within the containerized environment provided by [OCS.oci-terraform-docker](https://github.com/Mstaaravin/OCS.oci-terraform-docker), ensuring consistent tooling and dependencies for OCI infrastructure management.
+> **🐳 Environment Integration:** This script is designed to run within the containerized environment provided by [OCI.docker-environment](https://github.com/Mstaaravin/OCI.docker-environment), ensuring consistent tooling and dependencies for OCI infrastructure management.
 
 ## 📋 Table of Contents
 
@@ -467,9 +467,10 @@ Warning: Timed out waiting for session to become active.
 - 🛠️ [Simplify Secure Access to Oracle Workloads Using Bastions](https://www.ateam-oracle.com/post/simplify-secure-access-to-oracle-workloads-using-bastions) - Oracle A-Team best practices guide
 
 ### Related Projects
-- 🐳 [OCS.oci-terraform-docker](https://github.com/Mstaaravin/OCS.oci-terraform-docker) - Containerized OCI infrastructure management environment
+- 🐳 [OCI.docker-environment](https://github.com/Mstaaravin/OCI.docker-environment) - Containerized OCI infrastructure management environment
 
 ---
 
 > **Note**: This project is not an official Oracle product. Oracle Cloud Infrastructure and other Oracle product names are registered trademarks of Oracle Corporation.
+
 *Made with ❤️ for OCI infrastructure management*
